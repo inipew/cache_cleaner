@@ -7,9 +7,9 @@ use std::path::Path;
 
 use crate::config::SOCKET_PATH;
 use crate::error::{CleanerError, Result};
-use crate::ipc::protocol::{Command, Response};
 #[cfg(unix)]
 use crate::ipc::protocol::{read_message, send_message};
+use crate::ipc::protocol::{Command, Response};
 
 pub struct IpcClient;
 
@@ -46,10 +46,7 @@ impl IpcClient {
         }
 
         // 2. Try mandatory filesystem socket: /data/adb/cleaner/run/daemon
-        let socket_paths = [
-            SOCKET_PATH,
-            "/tmp/cleaner.sock",
-        ];
+        let socket_paths = [SOCKET_PATH, "/tmp/cleaner.sock"];
 
         for path in &socket_paths {
             if Path::new(path).exists() {
@@ -59,21 +56,16 @@ impl IpcClient {
             }
         }
 
-        Err(CleanerError::Ipc(
-            format!("Could not connect to cleaner daemon at {}. Is the daemon running?", SOCKET_PATH),
-        ))
+        Err(CleanerError::Ipc(format!(
+            "Could not connect to cleaner daemon at {}. Is the daemon running?",
+            SOCKET_PATH
+        )))
     }
 }
 
 #[cfg(unix)]
 fn connect_abstract_unix(name: &str) -> std::io::Result<UnixStream> {
-    let sock = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
+    let sock = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if sock < 0 {
         return Err(std::io::Error::last_os_error());
     }

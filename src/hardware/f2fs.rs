@@ -66,4 +66,3 @@ impl<'a> Drop for F2fsUrgentGuard<'a> {
         self.controller.set_gc_urgent(0);
     }
 }
-

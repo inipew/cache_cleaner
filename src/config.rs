@@ -99,6 +99,27 @@ pub struct OptimizationConfig {
     pub compact_memory: bool,
 
     #[serde(default = "default_true")]
+    pub cgroup_memory_reclaim: bool,
+
+    #[serde(default = "default_reclaim_amount_mb")]
+    pub cgroup_reclaim_amount_mb: u64,
+
+    #[serde(default = "default_true")]
+    pub freezer_aware_cleaning: bool,
+
+    #[serde(default = "default_true")]
+    pub psi_adaptive_monitoring: bool,
+
+    #[serde(default = "default_psi_moderate_stall_ms")]
+    pub psi_moderate_stall_ms: u32,
+
+    #[serde(default = "default_psi_critical_stall_ms")]
+    pub psi_critical_stall_ms: u32,
+
+    #[serde(default = "default_psi_cooldown_secs")]
+    pub psi_cooldown_secs: u64,
+
+    #[serde(default = "default_true")]
     pub f2fs_gc_urgent: bool,
 
     #[serde(default = "default_true")]
@@ -157,6 +178,22 @@ fn default_min_file_age_hours() -> u32 {
     0 // 0 means all cache files regardless of age
 }
 
+fn default_reclaim_amount_mb() -> u64 {
+    128 // 128 MB target page reclaim
+}
+
+fn default_psi_moderate_stall_ms() -> u32 {
+    150 // 150ms stall in 1s window
+}
+
+fn default_psi_critical_stall_ms() -> u32 {
+    250 // 250ms stall in 1s window
+}
+
+fn default_psi_cooldown_secs() -> u64 {
+    45 // 45 seconds cooldown between PSI actions
+}
+
 fn default_trim_mounts() -> Vec<String> {
     vec![
         "/data".to_string(),
@@ -207,6 +244,13 @@ impl Default for OptimizationConfig {
         Self {
             zram_compaction: default_true(),
             compact_memory: default_true(),
+            cgroup_memory_reclaim: default_true(),
+            cgroup_reclaim_amount_mb: default_reclaim_amount_mb(),
+            freezer_aware_cleaning: default_true(),
+            psi_adaptive_monitoring: default_true(),
+            psi_moderate_stall_ms: default_psi_moderate_stall_ms(),
+            psi_critical_stall_ms: default_psi_critical_stall_ms(),
+            psi_cooldown_secs: default_psi_cooldown_secs(),
             f2fs_gc_urgent: default_true(),
             fstrim_partitions: default_true(),
             trim_mount_points: default_trim_mounts(),
@@ -276,7 +320,10 @@ impl DaemonConfig {
         let content = fs::read_to_string(path.as_ref())?;
         let config: DaemonConfig = toml::from_str(&content)?;
         config.validate()?;
-        log::info!("Loaded configuration strictly from {}", path.as_ref().display());
+        log::info!(
+            "Loaded configuration strictly from {}",
+            path.as_ref().display()
+        );
         Ok(config)
     }
 

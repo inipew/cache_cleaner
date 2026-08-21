@@ -18,6 +18,14 @@ mod tests {
         assert!(!config.cleaning.clean_code_cache); // Safe default: code_cache disabled
 
         assert!(config.optimization.zram_compaction);
+        assert!(config.optimization.compact_memory);
+        assert!(config.optimization.cgroup_memory_reclaim);
+        assert_eq!(config.optimization.cgroup_reclaim_amount_mb, 128);
+        assert!(config.optimization.freezer_aware_cleaning);
+        assert!(config.optimization.psi_adaptive_monitoring);
+        assert_eq!(config.optimization.psi_moderate_stall_ms, 150);
+        assert_eq!(config.optimization.psi_critical_stall_ms, 250);
+        assert_eq!(config.optimization.psi_cooldown_secs, 45);
         assert!(config.optimization.f2fs_gc_urgent);
         assert!(config.optimization.fstrim_partitions);
     }
@@ -31,7 +39,10 @@ mod tests {
         assert!(toml_str.contains("clean_app_cache = true"));
 
         let parsed: DaemonConfig = toml::from_str(&toml_str).expect("Deserialization failed");
-        assert_eq!(parsed.maintenance_interval_secs, config.maintenance_interval_secs);
+        assert_eq!(
+            parsed.maintenance_interval_secs,
+            config.maintenance_interval_secs
+        );
         assert_eq!(parsed.socket_path, config.socket_path);
     }
 
@@ -64,12 +75,15 @@ mod tests {
         let invalid_file = tmp_dir.join("cleaner_invalid_test.toml");
 
         let config = DaemonConfig::default();
-        config.save_to_file(&valid_file).expect("Failed to save valid config");
+        config
+            .save_to_file(&valid_file)
+            .expect("Failed to save valid config");
 
         let loaded = DaemonConfig::load_from_file_strict(&valid_file);
         assert!(loaded.is_ok());
 
-        std::fs::write(&invalid_file, "this is not valid toml = = =").expect("Failed to write invalid file");
+        std::fs::write(&invalid_file, "this is not valid toml = = =")
+            .expect("Failed to write invalid file");
         let invalid_loaded = DaemonConfig::load_from_file_strict(&invalid_file);
         assert!(invalid_loaded.is_err());
 

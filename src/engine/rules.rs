@@ -20,6 +20,28 @@ pub struct RuleEngine {
     safety: SafetyConfig,
 }
 
+const OEM_LOG_ROOTS: &[&str] = &[
+    "/data/miui",
+    "/data/mqsas",
+    "/data/system/theme_magic",
+    "/data/log",
+    "/data/sec_log",
+    "/data/slog",
+    "/data/oppo/log",
+    "/data/oplus/log",
+    "/data/vendor/oppo/log",
+    "/data/vivo-apps/cache",
+    "/data/vendor/mtklog",
+    "/data/vendor/qcom",
+    "/data/vendor/ramdump",
+    "/data/vendor/connsys",
+    "/data/log/hilog",
+];
+
+const CRASH_DUMP_ROOTS: &[&str] = &["/data/tombstones", "/data/anr", "/data/system/dropbox"];
+
+const STAGED_APK_ROOTS: &[&str] = &["/data/app-staging", "/data/system/package_cache"];
+
 impl RuleEngine {
     pub fn new(rules: CleaningRulesConfig, safety: SafetyConfig) -> Self {
         Self { rules, safety }
@@ -32,7 +54,9 @@ impl RuleEngine {
         // 1. Safety Whitelist Check: NEVER touch protected critical files/directories
         for protected in &self.safety.protected_substrings {
             // Check if any path component exactly matches the protected pattern or path contains it
-            if path.components().any(|c| c.as_os_str() == protected.as_str())
+            if path
+                .components()
+                .any(|c| c.as_os_str() == protected.as_str())
                 || path_str.contains(protected)
             {
                 return JunkType::Ignored;
@@ -80,18 +104,17 @@ impl RuleEngine {
         // 3. Classify by path components and patterns
 
         // A. WebView / Chrome cache
-        if path_str.contains("app_webview/Default/Cache")
+        let is_webview_cache = path_str.contains("app_webview/Default/Cache")
             || path_str.contains("app_webview/Default/Code Cache")
             || path_str.contains("app_webview/Default/GPUCache")
             || path_str.contains("app_webview/Default/Service Worker/CacheStorage")
             || path_str.contains("app_webview/Default/Service Worker/ScriptCache")
             || path_str.contains("org.chromium.android_webview")
             || path_str.contains("app_textures")
-            || path_str.contains("splash_cache")
-        {
-            if self.rules.clean_webview_cache {
-                return JunkType::WebViewCache;
-            }
+            || path_str.contains("splash_cache");
+
+        if is_webview_cache && self.rules.clean_webview_cache {
+            return JunkType::WebViewCache;
         }
 
         // B. Common image & network cache libraries (Fresco, Glide, Coil, OkHttp, Picasso, Volley)
@@ -108,10 +131,8 @@ impl RuleEngine {
                 || s == "network_cache"
         });
 
-        if is_image_or_net_cache {
-            if self.rules.clean_image_caches {
-                return JunkType::ImageCache;
-            }
+        if is_image_or_net_cache && self.rules.clean_image_caches {
+            return JunkType::ImageCache;
         }
 
         // C. Thumbnail caches
@@ -125,68 +146,39 @@ impl RuleEngine {
                 || s == "micro_thumbnail"
         });
 
-        if is_thumbnail {
-            if self.rules.clean_thumbnails {
-                return JunkType::Thumbnail;
-            }
+        if is_thumbnail && self.rules.clean_thumbnails {
+            return JunkType::Thumbnail;
         }
 
         // D. App internal/external cache (component-aware: matches exact "cache" or "app_cache" directory)
-        if is_in_cache_folder {
-            if self.rules.clean_app_cache {
-                return JunkType::AppCache;
-            }
+        if is_in_cache_folder && self.rules.clean_app_cache {
+            return JunkType::AppCache;
         }
 
-        // E. OEM Vendor Logs
-        if path_str.contains("/data/miui/")
-            || path_str.contains("/data/mqsas/")
-            || path_str.contains("/data/system/theme_magic/")
-            || path_str.contains("/data/log/")
-            || path_str.contains("/data/sec_log/")
-            || path_str.contains("/data/slog/")
-            || path_str.contains("/data/oppo/log/")
-            || path_str.contains("/data/oplus/log/")
-            || path_str.contains("/data/vendor/oppo/log/")
-            || path_str.contains("/data/vivo-apps/cache/")
-            || path_str.contains("/data/vendor/mtklog/")
-            || path_str.contains("/data/vendor/qcom/")
-            || path_str.contains("/data/vendor/ramdump/")
-            || path_str.contains("/data/vendor/connsys/")
-            || path_str.contains("/data/log/hilog/")
-        {
-            if self.rules.clean_oem_logs {
-                return JunkType::OemLog;
-            }
+        // E. OEM Vendor Logs (Anchored to system root directories)
+        let is_oem_log_root = OEM_LOG_ROOTS.iter().any(|root| path.starts_with(root));
+        if is_oem_log_root && self.rules.clean_oem_logs {
+            return JunkType::OemLog;
         }
 
-        // F. Crash Dumps, ANR, and DropBox
-        if path_str.contains("/data/tombstones")
-            || path_str.contains("/data/anr")
-            || path_str.contains("/data/system/dropbox")
-        {
-            if self.rules.clean_crash_dumps {
-                return JunkType::CrashDump;
-            }
+        // F. Crash Dumps, ANR, and DropBox (Anchored to system root directories)
+        let is_crash_dump_root = CRASH_DUMP_ROOTS.iter().any(|root| path.starts_with(root));
+        if is_crash_dump_root && self.rules.clean_crash_dumps {
+            return JunkType::CrashDump;
         }
 
         // G. Temporary APKs & Staged APKs
-        if path_str.contains("/data/app-staging/")
-            || path_str.contains("/data/system/package_cache/")
-        {
-            if self.rules.clean_temp_apks {
+        let is_staged_apk = STAGED_APK_ROOTS.iter().any(|root| path.starts_with(root));
+        if is_staged_apk && self.rules.clean_temp_apks {
+            return JunkType::TempApk;
+        } else if path.starts_with("/data/local/tmp") && self.rules.clean_temp_apks {
+            let is_temp_artifact = path_str.ends_with(".apk")
+                || path_str.ends_with(".tmp")
+                || path_str.ends_with(".apks")
+                || path_str.ends_with(".xapk")
+                || path_str.ends_with(".dex");
+            if is_temp_artifact {
                 return JunkType::TempApk;
-            }
-        } else if path_str.contains("/data/local/tmp/") {
-            if self.rules.clean_temp_apks {
-                let is_temp_artifact = path_str.ends_with(".apk")
-                    || path_str.ends_with(".tmp")
-                    || path_str.ends_with(".apks")
-                    || path_str.ends_with(".xapk")
-                    || path_str.ends_with(".dex");
-                if is_temp_artifact {
-                    return JunkType::TempApk;
-                }
             }
         }
 
@@ -196,36 +188,14 @@ impl RuleEngine {
     pub fn get_system_junk_targets(&self) -> Vec<&'static str> {
         let mut targets = Vec::new();
         if self.rules.clean_oem_logs {
-            targets.extend_from_slice(&[
-                "/data/miui",
-                "/data/mqsas",
-                "/data/system/theme_magic",
-                "/data/log",
-                "/data/sec_log",
-                "/data/slog",
-                "/data/oppo/log",
-                "/data/oplus/log",
-                "/data/vendor/oppo/log",
-                "/data/vivo-apps/cache",
-                "/data/vendor/mtklog",
-                "/data/vendor/ramdump",
-                "/data/vendor/connsys",
-                "/data/log/hilog",
-            ]);
+            targets.extend_from_slice(OEM_LOG_ROOTS);
         }
         if self.rules.clean_crash_dumps {
-            targets.extend_from_slice(&[
-                "/data/tombstones",
-                "/data/anr",
-                "/data/system/dropbox",
-            ]);
+            targets.extend_from_slice(CRASH_DUMP_ROOTS);
         }
         if self.rules.clean_temp_apks {
-            targets.extend_from_slice(&[
-                "/data/app-staging",
-                "/data/local/tmp",
-                "/data/system/package_cache",
-            ]);
+            targets.extend_from_slice(STAGED_APK_ROOTS);
+            targets.push("/data/local/tmp");
         }
         targets
     }
@@ -252,19 +222,27 @@ mod tests {
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/user/0/com.whatsapp/code_cache/compiled_view.dex")),
+            engine.classify_path(Path::new(
+                "/data/user/0/com.whatsapp/code_cache/compiled_view.dex"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.spotify.music/code_cache/oat/arm64/base.odex")),
+            engine.classify_path(Path::new(
+                "/data/data/com.spotify.music/code_cache/oat/arm64/base.odex"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/misc/profiles/cur/0/com.instagram.android/primary.prof")),
+            engine.classify_path(Path::new(
+                "/data/misc/profiles/cur/0/com.instagram.android/primary.prof"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/dalvik-cache/arm64/system@framework@boot.art")),
+            engine.classify_path(Path::new(
+                "/data/dalvik-cache/arm64/system@framework@boot.art"
+            )),
             JunkType::Ignored
         );
     }
@@ -288,7 +266,9 @@ mod tests {
             JunkType::AppCache
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/media/0/Android/data/com.spotify.music/cache")),
+            engine.classify_path(Path::new(
+                "/data/media/0/Android/data/com.spotify.music/cache"
+            )),
             JunkType::AppCache
         );
     }
@@ -304,18 +284,58 @@ mod tests {
 
         // Package named "com.geocache.navigator" or "com.cachet.app" must NOT have its databases or files cleaned!
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.geocache.navigator/databases/geocache.db")),
+            engine.classify_path(Path::new(
+                "/data/data/com.geocache.navigator/databases/geocache.db"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.geocache.navigator/files/userdata.json")),
+            engine.classify_path(Path::new(
+                "/data/data/com.geocache.navigator/files/userdata.json"
+            )),
             JunkType::Ignored
         );
 
         // But its actual cache subfolder SHOULD be cleaned
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.geocache.navigator/cache/map_tile_12.png")),
+            engine.classify_path(Path::new(
+                "/data/data/com.geocache.navigator/cache/map_tile_12.png"
+            )),
             JunkType::AppCache
+        );
+    }
+
+    #[test]
+    fn test_app_data_subfolder_with_oem_names_is_not_false_positive() {
+        let rules = CleaningRulesConfig {
+            clean_oem_logs: true,
+            ..Default::default()
+        };
+        let safety = SafetyConfig::default();
+        let engine = RuleEngine::new(rules, safety);
+
+        // Files inside an app's files directory should NOT match OEM log rules even if naming overlaps
+        assert_eq!(
+            engine.classify_path(Path::new(
+                "/data/data/com.example.miui/files/custom_log.txt"
+            )),
+            JunkType::Ignored
+        );
+        assert_eq!(
+            engine.classify_path(Path::new(
+                "/data/user/0/com.samsung.custom/files/sec_log/app_data.bin"
+            )),
+            JunkType::Ignored
+        );
+
+        // But actual system root OEM logs SHOULD match
+        assert_eq!(
+            engine.classify_path(Path::new("/data/miui/debug_log.txt")),
+            JunkType::OemLog
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/log/kernel_log.txt")),
+            JunkType::OemLog
         );
     }
 
@@ -378,5 +398,3 @@ mod tests {
         );
     }
 }
-
-

@@ -1,7 +1,8 @@
-use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
+
+use crate::util::read_file_to_buf;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessMetrics {
@@ -15,6 +16,12 @@ pub struct CpuTracker {
     last_ticks: u64,
     last_sample: Instant,
     clk_tck: f32,
+}
+
+impl Default for CpuTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CpuTracker {
@@ -100,20 +107,28 @@ pub fn get_process_metrics_for_pid(pid: u32) -> ProcessMetrics {
 }
 
 fn read_proc_status_memory(pid: Option<u32>) -> (u64, u64) {
+    let mut path_buf = [0u8; 64];
     let path_str = match pid {
-        Some(p) => format!("/proc/{p}/status"),
-        None => "/proc/self/status".to_string(),
+        Some(p) => {
+            use std::io::Write;
+            let mut cursor = std::io::Cursor::new(&mut path_buf[..]);
+            let _ = write!(cursor, "/proc/{p}/status");
+            let pos = cursor.position() as usize;
+            std::str::from_utf8(&path_buf[..pos]).unwrap_or("/proc/self/status")
+        }
+        None => "/proc/self/status",
     };
 
     let mut vm_size = 0u64;
     let mut rss = 0u64;
+    let mut file_buf = [0u8; 2048];
 
-    if let Ok(content) = fs::read_to_string(path_str) {
+    if let Some(content) = read_file_to_buf(Path::new(path_str), &mut file_buf) {
         for line in content.lines() {
-            if line.starts_with("VmSize:") {
-                vm_size = parse_kb_value(line) * 1024;
-            } else if line.starts_with("VmRSS:") {
-                rss = parse_kb_value(line) * 1024;
+            if let Some(stripped) = line.strip_prefix("VmSize:") {
+                vm_size = parse_kb_value(stripped) * 1024;
+            } else if let Some(stripped) = line.strip_prefix("VmRSS:") {
+                rss = parse_kb_value(stripped) * 1024;
             }
         }
     }
@@ -122,28 +137,33 @@ fn read_proc_status_memory(pid: Option<u32>) -> (u64, u64) {
 }
 
 fn read_proc_smaps_rollup_pss(pid: Option<u32>, rss_out: &mut u64) -> u64 {
+    let mut path_buf = [0u8; 64];
     let path_str = match pid {
-        Some(p) => format!("/proc/{p}/smaps_rollup"),
-        None => "/proc/self/smaps_rollup".to_string(),
+        Some(p) => {
+            use std::io::Write;
+            let mut cursor = std::io::Cursor::new(&mut path_buf[..]);
+            let _ = write!(cursor, "/proc/{p}/smaps_rollup");
+            let pos = cursor.position() as usize;
+            std::str::from_utf8(&path_buf[..pos]).unwrap_or("/proc/self/smaps_rollup")
+        }
+        None => "/proc/self/smaps_rollup",
     };
 
-    let path = Path::new(&path_str);
-    if path.exists() {
-        if let Ok(content) = fs::read_to_string(path) {
-            let mut pss = 0u64;
-            for line in content.lines() {
-                if line.starts_with("Pss:") {
-                    pss = parse_kb_value(line) * 1024;
-                } else if line.starts_with("Rss:") {
-                    let r = parse_kb_value(line) * 1024;
-                    if r > 0 {
-                        *rss_out = r;
-                    }
+    let mut file_buf = [0u8; 2048];
+    if let Some(content) = read_file_to_buf(Path::new(path_str), &mut file_buf) {
+        let mut pss = 0u64;
+        for line in content.lines() {
+            if let Some(stripped) = line.strip_prefix("Pss:") {
+                pss = parse_kb_value(stripped) * 1024;
+            } else if let Some(stripped) = line.strip_prefix("Rss:") {
+                let r = parse_kb_value(stripped) * 1024;
+                if r > 0 {
+                    *rss_out = r;
                 }
             }
-            if pss > 0 {
-                return pss;
-            }
+        }
+        if pss > 0 {
+            return pss;
         }
     }
 
@@ -152,21 +172,29 @@ fn read_proc_smaps_rollup_pss(pid: Option<u32>, rss_out: &mut u64) -> u64 {
 }
 
 fn read_cpu_ticks(pid: Option<u32>) -> u64 {
+    let mut path_buf = [0u8; 64];
     let path_str = match pid {
-        Some(p) => format!("/proc/{p}/stat"),
-        None => "/proc/self/stat".to_string(),
+        Some(p) => {
+            use std::io::Write;
+            let mut cursor = std::io::Cursor::new(&mut path_buf[..]);
+            let _ = write!(cursor, "/proc/{p}/stat");
+            let pos = cursor.position() as usize;
+            std::str::from_utf8(&path_buf[..pos]).unwrap_or("/proc/self/stat")
+        }
+        None => "/proc/self/stat",
     };
 
-    if let Ok(content) = fs::read_to_string(path_str) {
+    let mut file_buf = [0u8; 2048];
+    if let Some(content) = read_file_to_buf(Path::new(path_str), &mut file_buf) {
         if let Some(pos) = content.rfind(')') {
             let rest = &content[pos + 1..];
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            // fields[0] is state (field 3 of /proc/<pid>/stat)
-            // fields[11] is utime (field 14 of /proc/<pid>/stat)
-            // fields[12] is stime (field 15 of /proc/<pid>/stat)
-            if fields.len() > 12 {
-                let utime: u64 = fields[11].parse().unwrap_or(0);
-                let stime: u64 = fields[12].parse().unwrap_or(0);
+            let mut iter = rest.split_ascii_whitespace();
+            // skip 0..10 fields after ')'
+            let utime_str = iter.nth(10); // utime is 11th token (0-indexed 10)
+            let stime_str = iter.next(); // stime is 12th token
+            if let (Some(u), Some(s)) = (utime_str, stime_str) {
+                let utime: u64 = u.parse().unwrap_or(0);
+                let stime: u64 = s.parse().unwrap_or(0);
                 return utime + stime;
             }
         }
@@ -176,9 +204,9 @@ fn read_cpu_ticks(pid: Option<u32>) -> u64 {
 }
 
 fn parse_kb_value(line: &str) -> u64 {
-    // Format: "Key:\t   12345 kB"
-    line.split_whitespace()
-        .nth(1)
+    // Format: "   12345 kB"
+    line.split_ascii_whitespace()
+        .next()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
 }

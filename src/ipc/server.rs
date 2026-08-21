@@ -1,6 +1,6 @@
-use crate::error::Result;
 #[cfg(unix)]
 use crate::error::CleanerError;
+use crate::error::Result;
 #[cfg(unix)]
 use crate::ipc::protocol::{read_message, send_message, Command, Response};
 #[cfg(unix)]
@@ -11,10 +11,29 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
+
+#[cfg(unix)]
+const MAX_CONCURRENT_IPC_WORKERS: usize = 4;
 
 pub struct IpcServer {
     #[cfg(unix)]
     listeners: Vec<UnixListener>,
+    #[cfg(unix)]
+    active_workers: Arc<AtomicUsize>,
+}
+
+#[cfg(unix)]
+struct WorkerGuard(Arc<AtomicUsize>);
+
+#[cfg(unix)]
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl IpcServer {
@@ -56,10 +75,15 @@ impl IpcServer {
             }
 
             if listeners.is_empty() {
-                return Err(CleanerError::Ipc("Failed to bind any IPC socket".to_string()));
+                return Err(CleanerError::Ipc(
+                    "Failed to bind any IPC socket".to_string(),
+                ));
             }
 
-            Ok(Self { listeners })
+            Ok(Self {
+                listeners,
+                active_workers: Arc::new(AtomicUsize::new(0)),
+            })
         }
         #[cfg(not(unix))]
         {
@@ -92,10 +116,31 @@ impl IpcServer {
                     continue;
                 }
 
+                // Check active worker concurrency limit to protect against thread exhaustion DoS
+                let current_workers = self.active_workers.load(Ordering::Relaxed);
+                if current_workers >= MAX_CONCURRENT_IPC_WORKERS {
+                    log::warn!(
+                        "IPC connection rejected: max worker limit reached ({})",
+                        MAX_CONCURRENT_IPC_WORKERS
+                    );
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ = send_message(
+                        &mut stream,
+                        &Response::Error("Daemon IPC busy, please retry shortly".to_string()),
+                    );
+                    continue;
+                }
+
+                self.active_workers.fetch_add(1, Ordering::SeqCst);
+                let worker_guard = WorkerGuard(self.active_workers.clone());
                 let handler_clone = handler.clone();
+
                 let _ = std::thread::Builder::new()
                     .name("ipc-worker".to_string())
+                    .stack_size(256 * 1024)
                     .spawn(move || {
+                        let _guard = worker_guard;
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
                         let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(120)));
@@ -134,7 +179,11 @@ impl IpcServer {
         if res == 0 {
             let uid = cred.uid;
             let current_uid = unsafe { libc::getuid() };
-            log::debug!("IPC peer connected with UID: {} (daemon UID: {})", uid, current_uid);
+            log::debug!(
+                "IPC peer connected with UID: {} (daemon UID: {})",
+                uid,
+                current_uid
+            );
             // Allow same UID, root (0), system (1000), shell/adb (2000)
             uid == current_uid || uid == 0 || uid == 1000 || uid == 2000
         } else {
@@ -144,7 +193,6 @@ impl IpcServer {
         }
     }
 }
-
 
 #[cfg(unix)]
 fn bind_abstract_unix(name: &str) -> std::io::Result<UnixListener> {

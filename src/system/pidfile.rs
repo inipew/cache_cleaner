@@ -89,6 +89,7 @@ impl PidLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o644)
             .open(&lock_path)?;
 
@@ -98,7 +99,9 @@ impl PidLock {
         let res = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
         if res != 0 {
             let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EWOULDBLOCK) || err.raw_os_error() == Some(libc::EAGAIN) {
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                || err.raw_os_error() == Some(libc::EAGAIN)
+            {
                 // Read PID from PID file
                 let mut pid = 0;
                 if let Ok(mut pf) = File::open(&pid_path) {
@@ -159,7 +162,10 @@ impl Drop for PidLock {
         let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
         let _ = fs::remove_file(&self.pid_path);
         let _ = fs::remove_file(&self.lock_path);
-        log::debug!("Released and cleaned PID lock files at {}", self.lock_path.display());
+        log::debug!(
+            "Released and cleaned PID lock files at {}",
+            self.lock_path.display()
+        );
     }
 }
 

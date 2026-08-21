@@ -53,13 +53,8 @@ impl SignalWatcher {
         let info_size = std::mem::size_of::<libc::signalfd_siginfo>();
 
         loop {
-            let n = unsafe {
-                libc::read(
-                    self.fd,
-                    &mut info as *mut _ as *mut libc::c_void,
-                    info_size,
-                )
-            };
+            let n =
+                unsafe { libc::read(self.fd, &mut info as *mut _ as *mut libc::c_void, info_size) };
 
             if n != info_size as isize {
                 break;

@@ -1,8 +1,11 @@
+use crate::util::read_file_to_buf;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChargerState {
     Charging,
     Discharging,
@@ -10,7 +13,7 @@ pub enum ChargerState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScreenState {
     On,
     Off,
@@ -37,11 +40,12 @@ impl UeventMessage {
         let first_line = lines.next()?;
 
         // First line format is typically: action@devpath (e.g. change@/devices/.../power_supply/battery)
-        let (action_from_header, devpath_from_header) = if let Some((act, path)) = first_line.split_once('@') {
-            (act.to_string(), path.to_string())
-        } else {
-            (String::new(), String::new())
-        };
+        let (action_from_header, devpath_from_header) =
+            if let Some((act, path)) = first_line.split_once('@') {
+                (act.to_string(), path.to_string())
+            } else {
+                (String::new(), String::new())
+            };
 
         let mut properties = HashMap::new();
         let mut action = action_from_header;
@@ -83,6 +87,7 @@ pub fn get_charger_state() -> ChargerState {
 
     let mut is_online_power_source = false;
     let mut battery_status = ChargerState::Unknown;
+    let mut buf = [0u8; 64];
 
     if let Ok(entries) = fs::read_dir(power_supply_dir) {
         for entry in entries.flatten() {
@@ -96,7 +101,7 @@ pub fn get_charger_state() -> ChargerState {
             let online_path = path.join("online");
             let status_path = path.join("status");
 
-            if let Ok(supply_type) = fs::read_to_string(&type_path) {
+            if let Some(supply_type) = read_file_to_buf(&type_path, &mut buf) {
                 let type_upper = supply_type.trim().to_uppercase();
 
                 if type_upper.contains("USB")
@@ -105,39 +110,41 @@ pub fn get_charger_state() -> ChargerState {
                     || type_upper.contains("WIRELESS")
                     || type_upper.contains("WIPOWER")
                 {
-                    if let Ok(online_val) = fs::read_to_string(&online_path) {
+                    let mut on_buf = [0u8; 16];
+                    if let Some(online_val) = read_file_to_buf(&online_path, &mut on_buf) {
                         if online_val.trim() == "1" {
                             is_online_power_source = true;
                         }
                     }
                 } else if type_upper.contains("BATTERY") || type_upper.contains("BMS") {
-                    if let Ok(status_str) = fs::read_to_string(&status_path) {
+                    let mut st_buf = [0u8; 32];
+                    if let Some(status_str) = read_file_to_buf(&status_path, &mut st_buf) {
                         let st = status_str.trim();
                         if st.eq_ignore_ascii_case("Charging") {
                             battery_status = ChargerState::Charging;
                         } else if st.eq_ignore_ascii_case("Full") {
                             battery_status = ChargerState::Full;
-                        } else if st.eq_ignore_ascii_case("Discharging")
-                            || st.eq_ignore_ascii_case("Not charging")
+                        } else if (st.eq_ignore_ascii_case("Discharging")
+                            || st.eq_ignore_ascii_case("Not charging"))
+                            && battery_status == ChargerState::Unknown
                         {
-                            if battery_status == ChargerState::Unknown {
-                                battery_status = ChargerState::Discharging;
-                            }
+                            battery_status = ChargerState::Discharging;
                         }
                     }
                 }
             } else {
                 // Device without type file: test status and online directly
-                if let Ok(status_str) = fs::read_to_string(&status_path) {
+                let mut st_buf = [0u8; 32];
+                if let Some(status_str) = read_file_to_buf(&status_path, &mut st_buf) {
                     let st = status_str.trim();
                     if st.eq_ignore_ascii_case("Charging") || st == "1" {
                         battery_status = ChargerState::Charging;
                     } else if st.eq_ignore_ascii_case("Full") {
                         battery_status = ChargerState::Full;
-                    } else if st.eq_ignore_ascii_case("Discharging") {
-                        if battery_status == ChargerState::Unknown {
-                            battery_status = ChargerState::Discharging;
-                        }
+                    } else if st.eq_ignore_ascii_case("Discharging")
+                        && battery_status == ChargerState::Unknown
+                    {
+                        battery_status = ChargerState::Discharging;
                     }
                 }
             }
@@ -166,8 +173,9 @@ fn get_charger_state_fallback() -> ChargerState {
         "/sys/class/power_supply/main/online",
     ];
 
+    let mut buf = [0u8; 32];
     for path in &status_paths {
-        if let Ok(content) = fs::read_to_string(path) {
+        if let Some(content) = read_file_to_buf(Path::new(path), &mut buf) {
             let trimmed = content.trim();
             if trimmed.eq_ignore_ascii_case("Charging") || trimmed == "1" {
                 return ChargerState::Charging;
@@ -184,6 +192,8 @@ fn get_charger_state_fallback() -> ChargerState {
 
 /// Dynamically discovers screen backlight, framebuffers, DRM nodes, and display status
 pub fn get_screen_state() -> ScreenState {
+    let mut buf = [0u8; 32];
+
     // 1. Check all dynamic backlight devices in /sys/class/backlight/
     if let Ok(entries) = fs::read_dir("/sys/class/backlight") {
         for entry in entries.flatten() {
@@ -192,8 +202,12 @@ pub fn get_screen_state() -> ScreenState {
             let actual_path = p.join("actual_brightness");
 
             // Try actual_brightness first, then brightness
-            let content = fs::read_to_string(&actual_path).or_else(|_| fs::read_to_string(&b_path));
-            if let Ok(val_str) = content {
+            let content = if let Some(c) = read_file_to_buf(&actual_path, &mut buf) {
+                Some(c)
+            } else {
+                read_file_to_buf(&b_path, &mut buf)
+            };
+            if let Some(val_str) = content {
                 if let Ok(brightness) = val_str.trim().parse::<u32>() {
                     return if brightness > 0 {
                         ScreenState::On
@@ -210,9 +224,12 @@ pub fn get_screen_state() -> ScreenState {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.contains("backlight") || name_str.contains("lcd") || name_str.contains("wled") {
+            if name_str.contains("backlight")
+                || name_str.contains("lcd")
+                || name_str.contains("wled")
+            {
                 let b_path = entry.path().join("brightness");
-                if let Ok(content) = fs::read_to_string(&b_path) {
+                if let Some(content) = read_file_to_buf(&b_path, &mut buf) {
                     if let Ok(brightness) = content.trim().parse::<u32>() {
                         return if brightness > 0 {
                             ScreenState::On
@@ -226,13 +243,12 @@ pub fn get_screen_state() -> ScreenState {
     }
 
     // 3. Check Framebuffer blank status (/sys/class/graphics/fb0/blank)
-    // 0 = FB_BLANK_UNBLANK (Screen is ON), >0 = Blanked / Screen OFF
     let fb_blank_paths = [
         "/sys/class/graphics/fb0/blank",
         "/sys/class/graphics/fb1/blank",
     ];
     for path in &fb_blank_paths {
-        if let Ok(content) = fs::read_to_string(path) {
+        if let Some(content) = read_file_to_buf(Path::new(path), &mut buf) {
             if let Ok(blank_val) = content.trim().parse::<u32>() {
                 return if blank_val == 0 {
                     ScreenState::On
@@ -244,11 +260,10 @@ pub fn get_screen_state() -> ScreenState {
     }
 
     // 4. Check DRM DPMS status (/sys/class/drm/card0-*/dpms)
-    // 0 = DRM_MODE_DPMS_ON, 3 = DRM_MODE_DPMS_OFF
     if let Ok(entries) = fs::read_dir("/sys/class/drm") {
         for entry in entries.flatten() {
             let dpms_path = entry.path().join("dpms");
-            if let Ok(dpms_str) = fs::read_to_string(&dpms_path) {
+            if let Some(dpms_str) = read_file_to_buf(&dpms_path, &mut buf) {
                 let trimmed = dpms_str.trim();
                 if trimmed == "0" || trimmed.eq_ignore_ascii_case("On") {
                     return ScreenState::On;
@@ -295,84 +310,66 @@ pub struct UeventSocket {
 
 #[cfg(unix)]
 impl UeventSocket {
-    /// Opens and binds a Linux kernel NETLINK_KOBJECT_UEVENT socket
+    /// Opens an AF_NETLINK socket subscribed to kernel uevent broadcast group
     pub fn open() -> std::io::Result<Self> {
-        let sock = unsafe {
+        let fd = unsafe {
             libc::socket(
                 libc::AF_NETLINK,
-                libc::SOCK_DGRAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-                15, // NETLINK_KOBJECT_UEVENT
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                libc::NETLINK_KOBJECT_UEVENT,
             )
         };
 
-        if sock < 0 {
+        if fd < 0 {
             return Err(std::io::Error::last_os_error());
-        }
-
-        // Increase receive buffer size to 256KB to avoid dropping bursts of kernel events
-        let rcvbuf: libc::c_int = 256 * 1024;
-        unsafe {
-            libc::setsockopt(
-                sock,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUFFORCE,
-                &rcvbuf as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-            libc::setsockopt(
-                sock,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &rcvbuf as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
         }
 
         let mut sa: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         sa.nl_family = libc::AF_NETLINK as libc::sa_family_t;
-        sa.nl_groups = 1; // Multicast group 1 (kernel uevents)
-        sa.nl_pid = 0;
+        sa.nl_pid = unsafe { libc::getpid() as u32 };
+        sa.nl_groups = 1; // NETLINK_KOBJECT_UEVENT group mask
 
-        let res = unsafe {
+        let bind_res = unsafe {
             libc::bind(
-                sock,
+                fd,
                 &sa as *const libc::sockaddr_nl as *const libc::sockaddr,
                 std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
             )
         };
 
-        if res < 0 {
-            unsafe { libc::close(sock) };
+        if bind_res < 0 {
+            unsafe { libc::close(fd) };
             return Err(std::io::Error::last_os_error());
         }
 
-        Ok(Self { fd: sock })
+        Ok(Self { fd })
     }
 
-    /// Read all pending uevents from the netlink socket without blocking
+    /// Read pending uevent datagram from netlink socket
+    pub fn read_event(&self) -> Option<UeventMessage> {
+        let mut buffer = [0u8; 4096];
+        let n = unsafe {
+            libc::recv(
+                self.fd,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+
+        if n > 0 {
+            UeventMessage::parse(&buffer[..n as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Read all pending uevent datagrams from netlink socket
     pub fn read_events(&self) -> Vec<UeventMessage> {
         let mut events = Vec::new();
-        let mut buf = [0u8; 4096];
-
-        loop {
-            let n = unsafe {
-                libc::recv(
-                    self.fd,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                    libc::MSG_DONTWAIT,
-                )
-            };
-
-            if n <= 0 {
-                break;
-            }
-
-            if let Some(event) = UeventMessage::parse(&buf[..n as usize]) {
-                events.push(event);
-            }
+        while let Some(ev) = self.read_event() {
+            events.push(ev);
         }
-
         events
     }
 }
@@ -380,8 +377,8 @@ impl UeventSocket {
 #[cfg(unix)]
 impl Drop for UeventSocket {
     fn drop(&mut self) {
-        if self.fd >= 0 {
-            unsafe { libc::close(self.fd) };
+        unsafe {
+            libc::close(self.fd);
         }
     }
 }

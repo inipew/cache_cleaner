@@ -56,9 +56,14 @@ pub struct CleanReport {
     pub temp_apks_freed_bytes: u64,
     pub total_freed_bytes: u64,
     pub deleted_files_count: usize,
+    pub frozen_apps_cleaned: usize,
+    pub active_apps_cleaned: usize,
     pub memory_compacted: bool,
     pub zram_compacted: bool,
+    pub cgroup_memory_reclaimed: bool,
     pub fstrim_completed: bool,
+    pub skipped_files_count: usize,
+    pub errors_count: usize,
     pub duration_ms: u64,
 }
 
@@ -109,4 +114,3 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> Re
     let obj = serde_json::from_slice(&payload)?;
     Ok(obj)
 }
-

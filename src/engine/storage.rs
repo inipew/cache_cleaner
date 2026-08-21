@@ -1,6 +1,6 @@
+use std::fs;
 #[cfg(unix)]
 use std::fs::File;
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -58,8 +58,12 @@ impl StorageOptimizer {
 
                     // Check if it is a block device and read-write
                     let is_rw = options.split(',').any(|o| o == "rw");
-                    let is_block_fs = matches!(fs_type, "f2fs" | "ext4" | "erofs" | "vfat" | "sdcardfs" | "fuse");
-                    let is_block_dev = dev.starts_with("/dev/block/") || dev.starts_with("/dev/root");
+                    let is_block_fs = matches!(
+                        fs_type,
+                        "f2fs" | "ext4" | "erofs" | "vfat" | "sdcardfs" | "fuse"
+                    );
+                    let is_block_dev =
+                        dev.starts_with("/dev/block/") || dev.starts_with("/dev/root");
 
                     if is_rw && is_block_fs && is_block_dev {
                         // Avoid virtual/runtime directories
@@ -91,18 +95,22 @@ impl StorageOptimizer {
                 let fitrim_ioctl = 0xc0185879_u32 as libc::c_int;
 
                 let res = unsafe {
-                    libc::ioctl(fd, fitrim_ioctl as _, &mut range as *mut _ as *mut libc::c_void)
+                    libc::ioctl(
+                        fd,
+                        fitrim_ioctl as _,
+                        &mut range as *mut _ as *mut libc::c_void,
+                    )
                 };
 
                 if res == 0 {
-                    log::info!(
-                        "FITRIM trimmed {} bytes on {}",
-                        range.len,
-                        mount_path
-                    );
+                    log::info!("FITRIM trimmed {} bytes on {}", range.len, mount_path);
                     return true;
                 } else {
-                    log::debug!("ioctl(FITRIM) on {} failed: {}", mount_path, std::io::Error::last_os_error());
+                    log::debug!(
+                        "ioctl(FITRIM) on {} failed: {}",
+                        mount_path,
+                        std::io::Error::last_os_error()
+                    );
                 }
             }
         }
@@ -126,4 +134,3 @@ impl StorageOptimizer {
         false
     }
 }
-

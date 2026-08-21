@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use cache_cleaner_daemon::config::{CleaningRulesConfig, SafetyConfig};
     use cache_cleaner_daemon::engine::rules::{JunkType, RuleEngine};
+    use std::path::Path;
 
     #[test]
     fn test_whitelist_safety() {
@@ -24,7 +24,9 @@ mod tests {
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.google.android.gms/files/auth_key")),
+            engine.classify_path(Path::new(
+                "/data/data/com.google.android.gms/files/auth_key"
+            )),
             JunkType::Ignored
         );
     }
@@ -37,21 +39,29 @@ mod tests {
 
         // Package named com.geocache.navigator - non-cache files MUST NOT be treated as junk
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.geocache.navigator/databases/points.db")),
+            engine.classify_path(Path::new(
+                "/data/data/com.geocache.navigator/databases/points.db"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/user/0/com.cachet.wallet/shared_prefs/keys.xml")),
+            engine.classify_path(Path::new(
+                "/data/user/0/com.cachet.wallet/shared_prefs/keys.xml"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.geocache.navigator/files/track.gpx")),
+            engine.classify_path(Path::new(
+                "/data/data/com.geocache.navigator/files/track.gpx"
+            )),
             JunkType::Ignored
         );
 
         // But its actual /cache folder SHOULD be AppCache
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.geocache.navigator/cache/tile.png")),
+            engine.classify_path(Path::new(
+                "/data/data/com.geocache.navigator/cache/tile.png"
+            )),
             JunkType::AppCache
         );
     }
@@ -67,11 +77,15 @@ mod tests {
         let engine = RuleEngine::new(rules, safety);
 
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.android.chrome/code_cache/test.dex")),
+            engine.classify_path(Path::new(
+                "/data/data/com.android.chrome/code_cache/test.dex"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/misc/profiles/cur/0/com.whatsapp/primary.prof")),
+            engine.classify_path(Path::new(
+                "/data/misc/profiles/cur/0/com.whatsapp/primary.prof"
+            )),
             JunkType::Ignored
         );
         assert_eq!(
@@ -88,23 +102,31 @@ mod tests {
 
         // Standard app cache
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.instagram.android/cache/temp_123.tmp")),
+            engine.classify_path(Path::new(
+                "/data/data/com.instagram.android/cache/temp_123.tmp"
+            )),
             JunkType::AppCache
         );
 
         // WebView cache
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.example.app/app_webview/Default/Cache/data_0")),
+            engine.classify_path(Path::new(
+                "/data/data/com.example.app/app_webview/Default/Cache/data_0"
+            )),
             JunkType::WebViewCache
         );
 
         // Image cache (Glide / Fresco / Coil)
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.example.app/cache/image_cache/abc")),
+            engine.classify_path(Path::new(
+                "/data/data/com.example.app/cache/image_cache/abc"
+            )),
             JunkType::ImageCache
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.example.app/cache/fresco_cache/v2/entry")),
+            engine.classify_path(Path::new(
+                "/data/data/com.example.app/cache/fresco_cache/v2/entry"
+            )),
             JunkType::ImageCache
         );
 
@@ -150,7 +172,9 @@ mod tests {
             JunkType::CrashDump
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/system/dropbox/data_app_crash@12345.txt.gz")),
+            engine.classify_path(Path::new(
+                "/data/system/dropbox/data_app_crash@12345.txt.gz"
+            )),
             JunkType::CrashDump
         );
 
@@ -171,10 +195,15 @@ mod tests {
 
     #[test]
     fn test_rustix_raw_dir_compilation() {
-        use rustix::fs::{openat, CWD, FileType, Mode, OFlags, RawDir};
+        use rustix::fs::{openat, FileType, Mode, OFlags, RawDir, CWD};
         use std::mem::MaybeUninit;
 
-        let res = openat(CWD, ".", OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty());
+        let res = openat(
+            CWD,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        );
         if let Ok(dir_fd) = res {
             let mut buf = [MaybeUninit::uninit(); 4096];
             let mut raw_dir = RawDir::new(&dir_fd, &mut buf);
@@ -193,4 +222,3 @@ mod tests {
         }
     }
 }
-

@@ -68,6 +68,19 @@ zram_compaction = true
 # Defragment and compact RAM page allocations (/proc/sys/vm/compact_memory)
 compact_memory = true
 
+# Proactively reclaim inactive cached pages via Cgroup v2 memory.reclaim (Android 13+ / Kernel 5.4+)
+cgroup_memory_reclaim = true
+cgroup_reclaim_amount_mb = 128
+
+# Adaptively prioritize cache cleaning for frozen background apps (zero lock contention)
+freezer_aware_cleaning = true
+
+# Event-driven real-time Memory & I/O Pressure Stall Information (PSI) monitoring
+psi_adaptive_monitoring = true
+psi_moderate_stall_ms = 150
+psi_critical_stall_ms = 250
+psi_cooldown_secs = 45
+
 # Activate F2FS background Garbage Collection (gc_urgent = 2) during idle charging
 f2fs_gc_urgent = true
 

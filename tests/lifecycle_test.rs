@@ -8,13 +8,19 @@ mod tests {
         assert!(lock1.is_ok(), "First PID lock acquisition should succeed");
 
         let lock2 = PidLock::acquire();
-        assert!(lock2.is_err(), "Second PID lock acquisition must fail due to mutual exclusion");
+        assert!(
+            lock2.is_err(),
+            "Second PID lock acquisition must fail due to mutual exclusion"
+        );
 
         // Drop lock1 to release the flock
         drop(lock1);
 
         let lock3 = PidLock::acquire();
-        assert!(lock3.is_ok(), "PID lock acquisition after drop should succeed");
+        assert!(
+            lock3.is_ok(),
+            "PID lock acquisition after drop should succeed"
+        );
         drop(lock3);
 
         clean_stale_pid_files();

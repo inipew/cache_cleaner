@@ -114,4 +114,3 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
 
     users
 }
-

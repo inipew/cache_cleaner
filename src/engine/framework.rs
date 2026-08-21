@@ -8,12 +8,12 @@ impl FrameworkHelper {
     /// Calls Android PackageManager to safely trim caches via StorageManagerService
     pub fn trim_caches(desired_bytes: u64) -> bool {
         let size_str = desired_bytes.to_string();
-        if let Ok(output) = Command::new("pm")
-            .args(["trim-caches", &size_str])
-            .output()
-        {
+        if let Ok(output) = Command::new("pm").args(["trim-caches", &size_str]).output() {
             if output.status.success() {
-                log::info!("Framework pm trim-caches executed with size {}", desired_bytes);
+                log::info!(
+                    "Framework pm trim-caches executed with size {}",
+                    desired_bytes
+                );
                 return true;
             }
         }

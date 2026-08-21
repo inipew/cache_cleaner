@@ -1,14 +1,29 @@
 pub mod cgroup;
+pub mod daemon_state;
+pub mod event_loop;
+pub mod freezer;
 pub mod governor;
 pub mod pidfile;
 pub mod proc_metrics;
+pub mod psi;
 pub mod signals;
 pub mod watcher;
 
-#[allow(unused_imports)]
+pub use cgroup::{
+    get_cgroup_diagnostics, is_memory_reclaim_supported, migrate_to_background_cgroup,
+    CgroupDiagnostics, CgroupMigrationSummary, CgroupVersion,
+};
+pub use daemon_state::{DaemonContext, DaemonRuntimeState, DaemonState};
+pub use event_loop::{run_epoll_loop, run_fallback_loop};
+pub use freezer::{
+    enumerate_frozen_uids, get_freezer_diagnostics, get_pid_freezer_state, get_uid_freezer_state,
+    is_cached_apps_freezer_enabled, is_freezer_supported, FreezerDiagnostics, FreezerState,
+};
 pub use pidfile::{clean_stale_pid_files, get_running_pid, is_process_alive, PidLock};
-#[allow(unused_imports)]
 pub use proc_metrics::{get_process_metrics, get_process_metrics_for_pid, ProcessMetrics};
-#[allow(unused_imports)]
+pub use psi::{
+    get_psi_diagnostics, is_psi_supported, read_io_pressure, read_memory_pressure, PsiDiagnostics,
+    PsiMetrics, PsiPressureLevel, PsiWatcher,
+};
 pub use signals::{SignalEvent, SignalWatcher};
 pub use watcher::DaemonRunner;

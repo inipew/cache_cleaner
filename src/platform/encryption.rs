@@ -4,8 +4,8 @@ use std::path::Path;
 #[allow(dead_code)]
 pub enum EncryptionState {
     Unencrypted,
-    DeviceEncryptedOnly,  // DE is accessible, CE is locked
-    FullyUnlocked,        // CE is accessible
+    DeviceEncryptedOnly, // DE is accessible, CE is locked
+    FullyUnlocked,       // CE is accessible
 }
 
 pub fn check_encryption_state(user_id: u32) -> EncryptionState {
@@ -18,7 +18,6 @@ pub fn check_encryption_state(user_id: u32) -> EncryptionState {
 
     let ce_path = Path::new(&ce_user_dir);
     let de_path = Path::new(&de_user_dir);
-
 
     // If neither exists, might be legacy Android or unencrypted root
     if !ce_path.exists() && !de_path.exists() {

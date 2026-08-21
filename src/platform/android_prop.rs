@@ -17,8 +17,8 @@ impl AndroidSystemInfo {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(28); // Fallback: Android 9 (API 28)
 
-        let release_version = get_property("ro.build.version.release")
-            .unwrap_or_else(|| "9.0".to_string());
+        let release_version =
+            get_property("ro.build.version.release").unwrap_or_else(|| "9.0".to_string());
 
         let manufacturer = get_property("ro.product.manufacturer")
             .unwrap_or_else(|| "unknown".to_string())
@@ -28,11 +28,11 @@ impl AndroidSystemInfo {
             .unwrap_or_else(|| "unknown".to_string())
             .to_lowercase();
 
-        let model = get_property("ro.product.model")
-            .unwrap_or_else(|| "Generic Android".to_string());
+        let model =
+            get_property("ro.product.model").unwrap_or_else(|| "Generic Android".to_string());
 
-        let crypto_state = get_property("ro.crypto.state")
-            .unwrap_or_else(|| "unencrypted".to_string());
+        let crypto_state =
+            get_property("ro.crypto.state").unwrap_or_else(|| "unencrypted".to_string());
         let is_encrypted = crypto_state == "encrypted";
 
         Self {
@@ -60,13 +60,12 @@ pub fn get_property(key: &str) -> Option<String> {
         if let Ok(c_key) = CString::new(key) {
             let mut val_buf = vec![0u8; 96]; // PROP_VALUE_MAX is 92 in bionic
             let len = unsafe {
-                __system_property_get(
-                    c_key.as_ptr(),
-                    val_buf.as_mut_ptr() as *mut c_char,
-                )
+                __system_property_get(c_key.as_ptr(), val_buf.as_mut_ptr() as *mut c_char)
             };
             if len > 0 {
-                if let Ok(c_str) = unsafe { CStr::from_ptr(val_buf.as_ptr() as *const c_char) }.to_str() {
+                if let Ok(c_str) =
+                    unsafe { CStr::from_ptr(val_buf.as_ptr() as *const c_char) }.to_str()
+                {
                     return Some(c_str.trim().to_string());
                 }
             }
