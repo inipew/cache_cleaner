@@ -1,0 +1,6 @@
+id=native_cache_cleaner
+name=Native Android Cache Cleaner & Optimizer (Rust)
+version=v1.0.0
+versionCode=100
+author=Antigravity
+description=Zero-idle-overhead native Rust background cleaner daemon supporting Android 9 to 16. Event-driven, CGroup background scheduling, and F2FS GC optimization.

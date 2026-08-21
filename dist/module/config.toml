@@ -1,0 +1,104 @@
+# ==============================================================================
+# Android Native Cache Cleaner & System Optimizer Configuration
+# ==============================================================================
+
+# Maintenance cycle interval in seconds (Default: 21600 = 6 hours)
+maintenance_interval_secs = 21600
+
+# IPC Socket path on Android filesystem
+socket_path = "/data/adb/cleaner/run/daemon"
+
+# Abstract namespace socket name (@cleaner_daemon)
+abstract_socket_name = "cleaner_daemon"
+
+# Only perform automatic background cleaning when screen is OFF
+require_screen_off = true
+
+# Only perform deep cleaning / FITRIM / ZRAM compact when device is charging
+require_charging_for_deep_clean = true
+
+# Minimum duration in seconds the screen must be continuously OFF before triggering (Default: 180 = 3 mins)
+min_screen_off_secs = 180
+
+# Thermal safety ceilings (in Celsius)
+max_soc_temp_c = 44.0
+max_battery_temp_c = 40.5
+
+# ------------------------------------------------------------------------------
+# Cleaning Rules
+# ------------------------------------------------------------------------------
+[cleaning]
+# Clean standard internal and external app caches (/cache, /data/media/0/Android/data/.../cache)
+clean_app_cache = true
+
+# Clean WebView and Chromium cache folders
+clean_webview_cache = true
+
+# Clean image caching libraries (Fresco, Glide, Coil, OkHttp cache)
+clean_image_caches = true
+
+# Clean media thumbnail directories (.thumbnails, .thumbcache)
+clean_thumbnails = true
+
+# Clean JIT dex code_cache (Disabled by default to avoid recompilation stutter)
+clean_code_cache = false
+
+# Clean OEM and vendor residue logs (MIUI/HyperOS mqsas, Samsung logs, BBK/Oppo logs, MTK/QCOM ramdumps)
+clean_oem_logs = true
+
+# Clean crash dumps, tombstones, ANR traces, and system dropbox dumps
+clean_crash_dumps = true
+
+# Number of recent crash dumps to retain for debugging (Default: 3)
+keep_recent_crash_files = 3
+
+# Clean temporary APKs, staged splits, and /data/local/tmp leftovers
+clean_temp_apks = true
+
+# Minimum file age in hours before considering it for deletion (0 = delete all matching junk)
+min_file_age_hours = 0
+
+# ------------------------------------------------------------------------------
+# System & Kernel Optimizations
+# ------------------------------------------------------------------------------
+[optimization]
+# Proactively compact ZRAM swap memory
+zram_compaction = true
+
+# Defragment and compact RAM page allocations (/proc/sys/vm/compact_memory)
+compact_memory = true
+
+# Activate F2FS background Garbage Collection (gc_urgent = 2) during idle charging
+f2fs_gc_urgent = true
+
+# Issue FITRIM storage wear-leveling on mounted flash partitions
+fstrim_partitions = true
+
+# Target partitions for FITRIM
+trim_mount_points = [
+    "/data",
+    "/cache",
+    "/metadata"
+]
+
+# ------------------------------------------------------------------------------
+# Safety & Whitelist Rules
+# ------------------------------------------------------------------------------
+[safety]
+# Package names that should be protected from aggressive scanning
+whitelist_packages = [
+    "android",
+    "com.android.systemui",
+    "com.google.android.gms"
+]
+
+# File/folder substring patterns that must NEVER be deleted under any circumstances
+protected_substrings = [
+    ".nomedia",
+    "shared_prefs",
+    "databases",
+    "lib",
+    "files",
+    "keystore",
+    "fpdata"
+]

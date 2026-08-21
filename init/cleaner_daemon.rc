@@ -1,0 +1,16 @@
+# Android Init Service Configuration for Native Cache Cleaner Daemon
+# For Android 9 to 16 (AOSP / Custom ROM)
+
+service cleaner_daemon /data/adb/cleaner/bin/cleaner daemon --config /data/adb/cleaner/config.toml
+    class late_start
+    user root
+    group root system
+    capabilities SYS_NICE SYS_ADMIN
+    task_profiles ProcessCapacityLow
+    socket cleaner_daemon stream 0660 root system
+    seclabel u:r:magisk:s0
+    disabled
+    oneshot
+
+on property:sys.boot_completed=1
+    start cleaner_daemon

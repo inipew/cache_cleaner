@@ -1,0 +1,57 @@
+#!/sbin/sh
+#################
+# Magisk Module #
+#################
+UMASK=022
+OUTFD=$2
+ZIPFILE=$3
+
+ui_print() {
+  echo -e "ui_print $1\nui_print" >> /proc/self/fd/$OUTFD
+}
+
+ui_print "****************************************"
+ui_print "* Native Android Cache Cleaner Daemon *"
+ui_print "****************************************"
+
+# Extract files
+unzip -o "$ZIPFILE" -d "$MODPATH" >&2
+
+BASE_DIR="/data/adb/cleaner"
+BIN_DIR="$BASE_DIR/bin"
+RUN_DIR="$BASE_DIR/run"
+
+ui_print "- Setting up directory layout: $BASE_DIR"
+mkdir -p "$BIN_DIR" "$RUN_DIR"
+chmod 0755 "$BASE_DIR" "$BIN_DIR" "$RUN_DIR"
+
+# Install binary to /data/adb/cleaner/bin/cleaner
+if [ -f "$MODPATH/system/bin/cleaner" ]; then
+  cp -f "$MODPATH/system/bin/cleaner" "$BIN_DIR/cleaner"
+elif [ -f "$MODPATH/system/bin/cleaner-daemon" ]; then
+  cp -f "$MODPATH/system/bin/cleaner-daemon" "$BIN_DIR/cleaner"
+fi
+chmod 0755 "$BIN_DIR/cleaner"
+
+# Copy default config if not already present
+if [ ! -f "$BASE_DIR/config.toml" ]; then
+  if [ -f "$MODPATH/config.toml" ]; then
+    cp "$MODPATH/config.toml" "$BASE_DIR/config.toml"
+  elif [ -f "$MODPATH/cleaner.toml" ]; then
+    cp "$MODPATH/cleaner.toml" "$BASE_DIR/config.toml"
+  fi
+  chmod 0644 "$BASE_DIR/config.toml"
+  ui_print "- Created default configuration at $BASE_DIR/config.toml"
+else
+  ui_print "- Existing configuration preserved at $BASE_DIR/config.toml"
+fi
+
+set_perm_recursive "$MODPATH" 0 0 0755 0644
+set_perm "$MODPATH/service.sh" 0 0 0755
+set_perm "$MODPATH/action.sh" 0 0 0755
+
+ui_print "- Binary    : $BIN_DIR/cleaner"
+ui_print "- Config    : $BASE_DIR/config.toml"
+ui_print "- Run Dir   : $RUN_DIR"
+ui_print "- Action    : $MODPATH/action.sh"
+ui_print "- Installation completed successfully!"
