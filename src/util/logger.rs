@@ -51,11 +51,11 @@ fn append_to_file(line: &str) {
         _ => return,
     };
 
-    let mut state_guard = FILE_STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut state_guard = FILE_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Rotate or initialize file handle
     if state_guard.is_none() {
-        let initial_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let initial_size = fs::metadata(path).map_or(0, |m| m.len());
         if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
             *state_guard = Some(LogFileState {
                 file,
@@ -63,6 +63,7 @@ fn append_to_file(line: &str) {
             });
         }
     }
+
 
     if let Some(ref mut state) = *state_guard {
         let line_len = line.len() as u64 + 1;

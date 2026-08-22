@@ -83,12 +83,8 @@ impl CleanEngine {
         // Execute all composable clean stages in pipeline
         self.pipeline.execute(&ctx, &mut report);
 
-        report.total_freed_bytes = report.app_cache_freed_bytes
-            + report.oem_logs_freed_bytes
-            + report.crash_dumps_freed_bytes
-            + report.temp_apks_freed_bytes;
-
-        report.duration_ms = start_time.elapsed().as_millis() as u64;
+        let duration_ms = u64::try_from(start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
+        report.finalize_totals(duration_ms);
 
         log::info!(
             "Clean job finished in {} ms. Freed: {} MB across {} files (errors: {}, skipped: {})",
@@ -102,3 +98,4 @@ impl CleanEngine {
         report
     }
 }
+

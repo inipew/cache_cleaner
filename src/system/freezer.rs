@@ -85,11 +85,12 @@ pub fn is_cached_apps_freezer_enabled() -> bool {
 
 /// Checks the freezer state for a specific Linux UID (e.g. 10000..19999 for Android apps)
 #[allow(dead_code)]
+#[must_use]
 pub fn get_uid_freezer_state(uid: u32) -> FreezerState {
     let version = detect_freezer_version();
 
     if version == "v2" {
-        let uid_cgroup = PathBuf::from(format!("/sys/fs/cgroup/uid_{}", uid));
+        let uid_cgroup = PathBuf::from(format!("/sys/fs/cgroup/uid_{uid}"));
         let freeze_file = uid_cgroup.join("cgroup.freeze");
         let events_file = uid_cgroup.join("cgroup.events");
 
@@ -153,12 +154,14 @@ pub fn get_uid_freezer_state(uid: u32) -> FreezerState {
 
 /// Checks the freezer state for a specific process PID
 #[allow(dead_code)]
+#[must_use]
 pub fn get_pid_freezer_state(pid: u32) -> FreezerState {
     let version = detect_freezer_version();
 
     if version == "v2" {
         // Check per-PID cgroup slice in /sys/fs/cgroup/
-        let pid_events = PathBuf::from(format!("/sys/fs/cgroup/pid_{}/cgroup.events", pid));
+        let pid_events = PathBuf::from(format!("/sys/fs/cgroup/pid_{pid}/cgroup.events"));
+
         if pid_events.exists() {
             if let Ok(content) = fs::read_to_string(&pid_events) {
                 if content.contains("frozen 1") {
@@ -184,6 +187,7 @@ pub fn get_pid_freezer_state(pid: u32) -> FreezerState {
 
 /// Enumerates all Android app UIDs that are currently in FROZEN state.
 /// This allows O(1) membership lookups during fast directory traversal.
+#[must_use]
 pub fn enumerate_frozen_uids() -> HashSet<u32> {
     let mut frozen = HashSet::new();
     let version = detect_freezer_version();
@@ -245,6 +249,7 @@ pub fn enumerate_frozen_uids() -> HashSet<u32> {
 }
 
 /// Gathers comprehensive Freezer diagnostics for status reporting and CLI
+#[must_use]
 pub fn get_freezer_diagnostics() -> FreezerDiagnostics {
     let version = detect_freezer_version();
     let is_enabled = is_cached_apps_freezer_enabled();
@@ -277,16 +282,17 @@ fn read_pids_from_file(path: &Path) -> Option<Vec<u32>> {
 }
 
 fn get_uid_of_pid(pid: u32) -> Option<u32> {
-    let status_path = format!("/proc/{}/status", pid);
+    let status_path = format!("/proc/{pid}/status");
     if let Ok(content) = fs::read_to_string(&status_path) {
         for line in content.lines() {
-            if line.starts_with("Uid:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    return parts[1].parse::<u32>().ok();
+            if let Some(rest) = line.strip_prefix("Uid:") {
+                let mut parts = rest.split_ascii_whitespace();
+                if let Some(uid_str) = parts.next() {
+                    return uid_str.parse::<u32>().ok();
                 }
             }
         }
     }
     None
 }
+

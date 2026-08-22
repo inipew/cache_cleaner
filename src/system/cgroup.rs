@@ -45,6 +45,7 @@ pub struct CgroupDiagnostics {
 }
 
 /// Detects the active cgroup hierarchy mode on the Android device
+#[must_use]
 pub fn detect_cgroup_version() -> CgroupVersion {
     let v2_controllers = Path::new("/sys/fs/cgroup/cgroup.controllers");
     let v2_procs = Path::new("/sys/fs/cgroup/cgroup.procs");
@@ -69,11 +70,13 @@ pub fn detect_cgroup_version() -> CgroupVersion {
 
 /// Checks if Cgroup v2 memory.reclaim interface is available in the kernel
 #[allow(dead_code)]
+#[must_use]
 pub fn is_memory_reclaim_supported() -> bool {
     !discover_memory_reclaim_paths().is_empty()
 }
 
 /// Discovers all available memory.reclaim paths on the system
+#[must_use]
 pub fn discover_memory_reclaim_paths() -> Vec<PathBuf> {
     let candidate_roots = [
         "/sys/fs/cgroup/memory.reclaim",
@@ -108,6 +111,7 @@ pub fn discover_memory_reclaim_paths() -> Vec<PathBuf> {
 }
 
 /// Reads the current process's cgroup memberships from `/proc/self/cgroup`
+#[must_use]
 pub fn read_current_process_cgroups() -> Vec<String> {
     #[cfg(unix)]
     {
@@ -123,6 +127,7 @@ pub fn read_current_process_cgroups() -> Vec<String> {
 }
 
 /// Gathers comprehensive Cgroup diagnostics for debugging and status reporting
+#[must_use]
 pub fn get_cgroup_diagnostics() -> CgroupDiagnostics {
     let version = detect_cgroup_version();
     let reclaim_paths: Vec<String> = discover_memory_reclaim_paths()
@@ -135,7 +140,7 @@ pub fn get_cgroup_diagnostics() -> CgroupDiagnostics {
     // Read Cgroup v2 enabled controllers
     if let Ok(content) = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers") {
         for c in content.split_whitespace() {
-            controllers.push(format!("v2:{}", c));
+            controllers.push(format!("v2:{c}"));
         }
     }
 
@@ -149,12 +154,12 @@ pub fn get_cgroup_diagnostics() -> CgroupDiagnostics {
     ];
     for (name, path) in &v1_checks {
         if Path::new(path).exists() {
-            controllers.push(format!("v1:{}", name));
+            controllers.push(format!("v1:{name}"));
         }
     }
 
     CgroupDiagnostics {
-        detected_version: format!("{}", version),
+        detected_version: format!("{version}"),
         controllers_available: controllers,
         current_process_cgroups: read_current_process_cgroups(),
         supports_memory_reclaim: !reclaim_paths.is_empty(),
@@ -165,15 +170,17 @@ pub fn get_cgroup_diagnostics() -> CgroupDiagnostics {
 /// Migrates the current process into background cgroups across both Cgroup v1 & v2.
 /// Guarantees that in Cgroup v1, all available subsystems (cpuset, cpuctl, stune, blkio)
 /// are targeted without early exit.
+#[must_use]
 pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
     let mut summary = CgroupMigrationSummary::default();
 
     #[cfg(unix)]
     {
         let pid = unsafe { libc::getpid() };
-        let pid_str = format!("{}\n", pid);
+        let pid_str = format!("{pid}\n");
         let version = detect_cgroup_version();
         summary.version = Some(version);
+
 
         match version {
             CgroupVersion::V2 => {

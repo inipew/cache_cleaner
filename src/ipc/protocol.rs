@@ -67,6 +67,58 @@ pub struct CleanReport {
     pub duration_ms: u64,
 }
 
+impl CleanReport {
+    /// Accumulates walk stats for multi-user app cache passes
+    pub fn record_app_cache_stats(&mut self, stats: &crate::engine::walker::WalkStats) {
+        self.app_cache_freed_bytes += stats.bytes_freed;
+        self.deleted_files_count += stats.files_deleted;
+        self.frozen_apps_cleaned += stats.frozen_apps_affected;
+        self.active_apps_cleaned += stats.active_apps_affected;
+        self.skipped_files_count += stats.skipped_files;
+        self.errors_count += stats.errors_count;
+    }
+
+    /// Accumulates walk stats categorized by system junk target path
+    pub fn record_system_junk_stats(
+        &mut self,
+        stats: &crate::engine::walker::WalkStats,
+        target: &str,
+    ) {
+        if target.contains("log")
+            || target.contains("miui")
+            || target.contains("oppo")
+            || target.contains("vivo")
+            || target.contains("hilog")
+        {
+            self.oem_logs_freed_bytes += stats.bytes_freed;
+        } else if target.contains("tombstones")
+            || target.contains("anr")
+            || target.contains("dropbox")
+        {
+            self.crash_dumps_freed_bytes += stats.bytes_freed;
+        } else if target.contains("app-staging")
+            || target.contains("tmp")
+            || target.contains("package_cache")
+        {
+            self.temp_apks_freed_bytes += stats.bytes_freed;
+        }
+
+        self.deleted_files_count += stats.files_deleted;
+        self.skipped_files_count += stats.skipped_files;
+        self.errors_count += stats.errors_count;
+    }
+
+    /// Calculates total freed bytes from subcategories and sets job duration
+    pub fn finalize_totals(&mut self, duration_ms: u64) {
+        self.total_freed_bytes = self.app_cache_freed_bytes
+            + self.oem_logs_freed_bytes
+            + self.crash_dumps_freed_bytes
+            + self.temp_apks_freed_bytes;
+        self.duration_ms = duration_ms;
+    }
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data")]
 pub enum Response {

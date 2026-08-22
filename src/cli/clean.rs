@@ -48,8 +48,9 @@ pub fn execute_clean(config: DaemonConfig, deep: bool, trim: bool, zram: bool, d
         };
 
         // Apply low priorities and background cgroup
-        crate::system::migrate_to_background_cgroup();
+        let _ = crate::system::migrate_to_background_cgroup();
         crate::system::governor::set_idle_priorities();
+
 
         let cancel_token = CancellationToken::new();
         let engine = CleanEngine::new(config);

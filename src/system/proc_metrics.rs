@@ -74,13 +74,10 @@ static CPU_TRACKER: Mutex<Option<CpuTracker>> = Mutex::new(None);
 pub fn get_process_metrics() -> ProcessMetrics {
     let mut cpu_pct = 0.0;
     if let Ok(mut guard) = CPU_TRACKER.lock() {
-        if guard.is_none() {
-            *guard = Some(CpuTracker::new());
-        }
-        if let Some(ref mut tracker) = *guard {
-            cpu_pct = tracker.sample_cpu_pct();
-        }
+        let tracker = guard.get_or_insert_with(CpuTracker::new);
+        cpu_pct = tracker.sample_cpu_pct();
     }
+
 
     let (vm_size_bytes, mut rss_bytes) = read_proc_status_memory(None);
     let pss_bytes = read_proc_smaps_rollup_pss(None, &mut rss_bytes);
@@ -207,6 +204,7 @@ fn parse_kb_value(line: &str) -> u64 {
     // Format: "   12345 kB"
     line.split_ascii_whitespace()
         .next()
-        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|v| v.parse().ok())
         .unwrap_or(0)
 }
+

@@ -123,13 +123,12 @@ impl PidLock {
             .mode(0o644)
             .open(&pid_path)?;
 
-        writeln!(pid_file, "{}", current_pid)?;
+        writeln!(pid_file, "{current_pid}")?;
         pid_file.flush()?;
 
         log::debug!(
-            "Acquired exclusive lock at {} and wrote PID {} to {}",
+            "Acquired exclusive lock at {} and wrote PID {current_pid} to {}",
             lock_path.display(),
-            current_pid,
             pid_path.display()
         );
 
@@ -140,20 +139,24 @@ impl PidLock {
         })
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.pid_path
     }
 
     #[allow(dead_code)]
+    #[must_use]
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
     }
 
     #[allow(dead_code)]
+    #[must_use]
     pub fn pid_path(&self) -> &Path {
         &self.pid_path
     }
 }
+
 
 #[cfg(unix)]
 impl Drop for PidLock {
@@ -170,6 +173,7 @@ impl Drop for PidLock {
 }
 
 /// Checks if a daemon is currently running by testing candidate lock and PID files.
+#[must_use]
 pub fn get_running_pid() -> Option<u32> {
     #[cfg(unix)]
     {
@@ -221,7 +225,9 @@ pub fn get_running_pid() -> Option<u32> {
 }
 
 /// Checks whether a process with the given PID is currently active.
+#[must_use]
 pub fn is_process_alive(pid: u32) -> bool {
+
     if pid == 0 {
         return false;
     }

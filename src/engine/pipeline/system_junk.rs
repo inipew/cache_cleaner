@@ -31,29 +31,9 @@ impl CleanStage for SystemJunkStage {
                     ctx.walker.clean_directory(path)
                 };
 
-                if target.contains("log")
-                    || target.contains("miui")
-                    || target.contains("oppo")
-                    || target.contains("vivo")
-                    || target.contains("hilog")
-                {
-                    report.oem_logs_freed_bytes += stats.bytes_freed;
-                } else if target.contains("tombstones")
-                    || target.contains("anr")
-                    || target.contains("dropbox")
-                {
-                    report.crash_dumps_freed_bytes += stats.bytes_freed;
-                } else if target.contains("app-staging")
-                    || target.contains("tmp")
-                    || target.contains("package_cache")
-                {
-                    report.temp_apks_freed_bytes += stats.bytes_freed;
-                }
-
-                report.deleted_files_count += stats.files_deleted;
-                report.skipped_files_count += stats.skipped_files;
-                report.errors_count += stats.errors_count;
+                report.record_system_junk_stats(&stats, target);
             }
         }
     }
 }
+

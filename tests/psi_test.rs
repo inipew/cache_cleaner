@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use cache_cleaner_daemon::system::psi::{
         evaluate_current_pressure_level, get_psi_diagnostics, is_psi_supported, parse_psi_content,
@@ -13,7 +14,7 @@ mod tests {
         assert_eq!(metrics.some.avg10, 2.34);
         assert_eq!(metrics.some.avg60, 1.50);
         assert_eq!(metrics.some.avg300, 0.85);
-        assert_eq!(metrics.some.total_us, 1234567);
+        assert_eq!(metrics.some.total_us, 1_234_567);
 
         let full = metrics.full.expect("Full metric sample missing");
         assert_eq!(full.avg10, 0.15);
@@ -31,6 +32,7 @@ mod tests {
         assert_eq!(metrics.some.avg10, 12.50);
         assert!(metrics.full.is_none());
     }
+
 
     #[test]
     fn test_parse_invalid_psi_content() {

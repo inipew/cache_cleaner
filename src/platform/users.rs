@@ -9,6 +9,7 @@ pub struct AndroidUser {
     pub media_path: PathBuf,
 }
 
+#[must_use]
 pub fn enumerate_users() -> Vec<AndroidUser> {
     let mut users = Vec::new();
     let mut user_ids = vec![0u32];
@@ -94,14 +95,14 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
                 PathBuf::from("/data/user/0")
             }
         } else {
-            let user_ce = PathBuf::from(format!("/data/user/{}", id));
+            let user_ce = PathBuf::from(format!("/data/user/{id}"));
             fs::canonicalize(&user_ce).unwrap_or(user_ce)
         };
 
-        let de_raw = PathBuf::from(format!("/data/user_de/{}", id));
+        let de_raw = PathBuf::from(format!("/data/user_de/{id}"));
         let de_path = fs::canonicalize(&de_raw).unwrap_or(de_raw);
 
-        let media_raw = PathBuf::from(format!("/data/media/{}", id));
+        let media_raw = PathBuf::from(format!("/data/media/{id}"));
         let media_path = fs::canonicalize(&media_raw).unwrap_or(media_raw);
 
         users.push(AndroidUser {
@@ -114,3 +115,4 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
 
     users
 }
+

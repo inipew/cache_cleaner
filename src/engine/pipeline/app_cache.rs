@@ -23,36 +23,22 @@ impl CleanStage for AppCacheStage {
             // Clean DE (Device Encrypted) cache (Always accessible)
             if user.de_path.exists() {
                 let stats = ctx.walker.clean_directory(&user.de_path);
-                report.app_cache_freed_bytes += stats.bytes_freed;
-                report.deleted_files_count += stats.files_deleted;
-                report.frozen_apps_cleaned += stats.frozen_apps_affected;
-                report.active_apps_cleaned += stats.active_apps_affected;
-                report.skipped_files_count += stats.skipped_files;
-                report.errors_count += stats.errors_count;
+                report.record_app_cache_stats(&stats);
             }
 
             // Clean CE (Credential Encrypted) cache if decrypted
             if enc_state == EncryptionState::FullyUnlocked && user.ce_path.exists() {
                 let stats = ctx.walker.clean_directory(&user.ce_path);
-                report.app_cache_freed_bytes += stats.bytes_freed;
-                report.deleted_files_count += stats.files_deleted;
-                report.frozen_apps_cleaned += stats.frozen_apps_affected;
-                report.active_apps_cleaned += stats.active_apps_affected;
-                report.skipped_files_count += stats.skipped_files;
-                report.errors_count += stats.errors_count;
+                report.record_app_cache_stats(&stats);
             }
 
             // Clean External Media cache (/data/media/<id>/Android/data/)
             let ext_data = user.media_path.join("Android/data");
             if ext_data.exists() {
                 let stats = ctx.walker.clean_directory(&ext_data);
-                report.app_cache_freed_bytes += stats.bytes_freed;
-                report.deleted_files_count += stats.files_deleted;
-                report.frozen_apps_cleaned += stats.frozen_apps_affected;
-                report.active_apps_cleaned += stats.active_apps_affected;
-                report.skipped_files_count += stats.skipped_files;
-                report.errors_count += stats.errors_count;
+                report.record_app_cache_stats(&stats);
             }
         }
     }
 }
+

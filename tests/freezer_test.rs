@@ -12,11 +12,12 @@ mod tests {
         assert!(version == "v2" || version == "v1" || version == "none");
 
         let supported = is_freezer_supported();
-        if version != "none" {
-            assert!(supported);
-        } else {
+        if version == "none" {
             assert!(!supported);
+        } else {
+            assert!(supported);
         }
+
     }
 
     #[test]

@@ -29,6 +29,21 @@ mod tests {
             )),
             JunkType::Ignored
         );
+
+        // Package names with substrings overlapping with protected patterns (e.g. "lib", "files", "database")
+        // must NOT have their cache directory ignored
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.libra.browser/cache/cached_image.png")),
+            JunkType::AppCache
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.delivery.profiles/cache/tile.png")),
+            JunkType::AppCache
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.database.explorer/cache/query_cache.bin")),
+            JunkType::AppCache
+        );
     }
 
     #[test]
@@ -212,9 +227,17 @@ mod tests {
                 if let Ok(entry) = entry_res {
                     let _name = entry.file_name();
                     let ft = entry.file_type();
-                    let _is_d = ft == FileType::Directory;
-                    let _is_l = ft == FileType::Symlink;
-                    let _is_f = ft == FileType::RegularFile;
+                    assert!(matches!(
+                        ft,
+                        FileType::Directory
+                            | FileType::Symlink
+                            | FileType::RegularFile
+                            | FileType::Unknown
+                            | FileType::CharacterDevice
+                            | FileType::BlockDevice
+                            | FileType::Fifo
+                            | FileType::Socket
+                    ));
                     count += 1;
                 }
             }
@@ -222,3 +245,4 @@ mod tests {
         }
     }
 }
+

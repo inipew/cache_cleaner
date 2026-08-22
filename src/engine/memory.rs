@@ -58,15 +58,14 @@ impl MemoryOptimizer {
         }
 
         let target_bytes = target_mb.saturating_mul(1024 * 1024);
-        let payload = format!("{}\n", target_bytes);
+        let payload = format!("{target_bytes}\n");
 
         let mut success = false;
         for path in &paths {
             match fs::write(path, &payload) {
                 Ok(_) => {
                     log::info!(
-                        "Cgroup v2 memory reclaim (target: {} MB) triggered successfully on {}",
-                        target_mb,
+                        "Cgroup v2 memory reclaim (target: {target_mb} MB) triggered successfully on {}",
                         path.display()
                     );
                     success = true;
@@ -74,15 +73,15 @@ impl MemoryOptimizer {
                 Err(e) => {
                     // Writing to memory.reclaim may return EAGAIN / EBUSY if memory cannot be reclaimed
                     log::debug!(
-                        "Cgroup memory reclaim on {} completed or yielded: {}",
-                        path.display(),
-                        e
+                        "Cgroup memory reclaim on {} completed or yielded: {e}",
+                        path.display()
                     );
                     // Even if partial, it triggered kernel reclaim
                     success = true;
                 }
             }
         }
+
 
         success
     }

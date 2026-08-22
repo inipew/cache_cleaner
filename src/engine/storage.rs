@@ -92,26 +92,28 @@ impl StorageOptimizer {
                     minlen: 0,
                 };
 
-                let fitrim_ioctl = 0xc0185879_u32 as libc::c_int;
+                #[cfg(target_os = "android")]
+                const FITRIM_IOCTL: libc::c_int = 0xc018_5879_u32 as libc::c_int;
+                #[cfg(not(target_os = "android"))]
+                const FITRIM_IOCTL: libc::c_ulong = 0xc018_5879;
 
                 let res = unsafe {
                     libc::ioctl(
                         fd,
-                        fitrim_ioctl as _,
-                        &mut range as *mut _ as *mut libc::c_void,
+                        FITRIM_IOCTL as _,
+                        std::ptr::addr_of_mut!(range).cast::<libc::c_void>(),
                     )
                 };
 
                 if res == 0 {
-                    log::info!("FITRIM trimmed {} bytes on {}", range.len, mount_path);
+                    log::info!("FITRIM trimmed {} bytes on {mount_path}", range.len);
                     return true;
-                } else {
-                    log::debug!(
-                        "ioctl(FITRIM) on {} failed: {}",
-                        mount_path,
-                        std::io::Error::last_os_error()
-                    );
                 }
+                log::debug!(
+                    "ioctl(FITRIM) on {mount_path} failed: {}",
+                    std::io::Error::last_os_error()
+                );
+
             }
         }
 

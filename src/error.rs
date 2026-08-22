@@ -20,47 +20,58 @@ pub enum CleanerError {
 impl fmt::Display for CleanerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CleanerError::Io(e) => write!(f, "I/O error: {}", e),
-            CleanerError::Json(e) => write!(f, "JSON parse error: {}", e),
-            CleanerError::Toml(e) => write!(f, "TOML decode error: {}", e),
-            CleanerError::TomlSer(e) => write!(f, "TOML encode error: {}", e),
-            CleanerError::Ipc(msg) => write!(f, "IPC error: {}", msg),
-            CleanerError::Config(msg) => write!(f, "Configuration error: {}", msg),
-            CleanerError::DaemonAlreadyRunning(pid) => {
-                write!(f, "Daemon is already running with PID {}", pid)
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Json(e) => write!(f, "JSON parse error: {e}"),
+            Self::Toml(e) => write!(f, "TOML decode error: {e}"),
+            Self::TomlSer(e) => write!(f, "TOML encode error: {e}"),
+            Self::Ipc(msg) => write!(f, "IPC error: {msg}"),
+            Self::Config(msg) => write!(f, "Configuration error: {msg}"),
+            Self::DaemonAlreadyRunning(pid) => {
+                write!(f, "Daemon is already running with PID {pid}")
             }
-            CleanerError::DaemonNotRunning => write!(f, "Daemon is not running"),
-            CleanerError::Platform(msg) => write!(f, "Platform error: {}", msg),
-            CleanerError::Cancelled => write!(f, "Operation was cancelled / preempted"),
-            CleanerError::Other(msg) => write!(f, "Error: {}", msg),
+            Self::DaemonNotRunning => write!(f, "Daemon is not running"),
+            Self::Platform(msg) => write!(f, "Platform error: {msg}"),
+            Self::Cancelled => write!(f, "Operation was cancelled / preempted"),
+            Self::Other(msg) => write!(f, "Error: {msg}"),
         }
     }
 }
 
-impl std::error::Error for CleanerError {}
+impl std::error::Error for CleanerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Json(err) => Some(err),
+            Self::Toml(err) => Some(err),
+            Self::TomlSer(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<io::Error> for CleanerError {
     fn from(err: io::Error) -> Self {
-        CleanerError::Io(err)
+        Self::Io(err)
     }
 }
 
 impl From<serde_json::Error> for CleanerError {
     fn from(err: serde_json::Error) -> Self {
-        CleanerError::Json(err)
+        Self::Json(err)
     }
 }
 
 impl From<toml::de::Error> for CleanerError {
     fn from(err: toml::de::Error) -> Self {
-        CleanerError::Toml(err)
+        Self::Toml(err)
     }
 }
 
 impl From<toml::ser::Error> for CleanerError {
     fn from(err: toml::ser::Error) -> Self {
-        CleanerError::TomlSer(err)
+        Self::TomlSer(err)
     }
 }
 
 pub type Result<T> = std::result::Result<T, CleanerError>;
+

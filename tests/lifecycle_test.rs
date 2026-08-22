@@ -31,7 +31,8 @@ mod tests {
         let current_pid = std::process::id();
         assert!(is_process_alive(current_pid));
         assert!(!is_process_alive(0));
-        // PID 999999 is almost certainly non-existent
-        assert!(!is_process_alive(999999));
+        // PID 999_999 is almost certainly non-existent
+        assert!(!is_process_alive(999_999));
     }
 }
+

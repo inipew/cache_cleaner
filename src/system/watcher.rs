@@ -10,18 +10,21 @@ use crate::system::pidfile::PidLock;
 pub use crate::system::daemon_state::{DaemonContext, DaemonRuntimeState, DaemonState};
 pub use crate::system::event_loop::{run_epoll_loop, run_fallback_loop};
 
-/// DaemonRunner manages the process lifecycle, PID lock, OS prioritization, and launches the event reactor.
+/// `DaemonRunner` manages the process lifecycle, PID lock, OS prioritization, and launches the event reactor.
 pub struct DaemonRunner {
+
     ctx: Arc<DaemonContext>,
 }
 
 impl DaemonRunner {
+    #[must_use]
     pub fn new(config: DaemonConfig, active_config_path: Option<PathBuf>) -> Self {
         Self {
             ctx: Arc::new(DaemonContext::new(config, active_config_path)),
         }
     }
 
+    #[must_use]
     pub fn context(&self) -> Arc<DaemonContext> {
         self.ctx.clone()
     }
@@ -43,8 +46,8 @@ impl DaemonRunner {
                 lock
             }
             Err(e) => {
-                log::error!("Cannot start daemon: {}", e);
-                eprintln!("[!] Cannot start daemon: {}", e);
+                log::error!("Cannot start daemon: {e}");
+                eprintln!("[!] Cannot start daemon: {e}");
                 return;
             }
         };
@@ -61,7 +64,7 @@ impl DaemonRunner {
 
         // 3. Initialize IPC Server
         let (socket_path, abstract_socket_name) = {
-            let cfg = self.ctx.config.read().unwrap_or_else(|p| p.into_inner());
+            let cfg = self.ctx.config.read().unwrap_or_else(std::sync::PoisonError::into_inner);
             (cfg.socket_path.clone(), cfg.abstract_socket_name.clone())
         };
 
@@ -69,12 +72,12 @@ impl DaemonRunner {
             Ok(server) => Some(server),
             Err(e) => {
                 log::warn!(
-                    "Failed to initialize IPC server: {}. Continuing without IPC.",
-                    e
+                    "Failed to initialize IPC server: {e}. Continuing without IPC."
                 );
                 None
             }
         };
+
 
         // Trim startup heap allocations back to the kernel before entering event loop
         crate::util::trim_heap_memory();

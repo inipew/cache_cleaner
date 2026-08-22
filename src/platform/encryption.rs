@@ -8,13 +8,15 @@ pub enum EncryptionState {
     FullyUnlocked,       // CE is accessible
 }
 
+#[must_use]
 pub fn check_encryption_state(user_id: u32) -> EncryptionState {
     let ce_user_dir = if user_id == 0 {
         "/data/data".to_string()
     } else {
-        format!("/data/user/{}", user_id)
+        format!("/data/user/{user_id}")
     };
-    let de_user_dir = format!("/data/user_de/{}", user_id);
+    let de_user_dir = format!("/data/user_de/{user_id}");
+
 
     let ce_path = Path::new(&ce_user_dir);
     let de_path = Path::new(&de_user_dir);

@@ -351,18 +351,19 @@ impl UeventSocket {
         let n = unsafe {
             libc::recv(
                 self.fd,
-                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
                 buffer.len(),
                 libc::MSG_DONTWAIT,
             )
         };
 
         if n > 0 {
-            UeventMessage::parse(&buffer[..n as usize])
+            usize::try_from(n).ok().and_then(|len| UeventMessage::parse(&buffer[..len]))
         } else {
             None
         }
     }
+
 
     /// Read all pending uevent datagrams from netlink socket
     pub fn read_events(&self) -> Vec<UeventMessage> {

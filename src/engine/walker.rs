@@ -43,11 +43,12 @@ impl<'a> DirectoryWalker<'a> {
         Self {
             rule_engine,
             cancel_token,
-            min_age: Duration::from_secs((min_age_hours as u64) * 3600),
+            min_age: Duration::from_secs(u64::from(min_age_hours) * 3600),
             dry_run,
             frozen_uids: None,
         }
     }
+
 
     pub fn with_frozen_uids(
         mut self,
@@ -140,6 +141,8 @@ impl<'a> DirectoryWalker<'a> {
 
         // Sort descending by modified time (newest first)
         crash_files.sort_by_key(|b| std::cmp::Reverse(b.2));
+
+
 
         // Skip the newest `keep_count` files, delete the older ones
         for (path, size, _) in crash_files.into_iter().skip(keep_count) {
@@ -518,7 +521,7 @@ impl<'a> DirectoryWalker<'a> {
                     if !self.dry_run {
                         let _ = fs::remove_dir(&p);
                     }
-                } else if file_type == FileType::file() {
+                } else if file_type.is_file() {
                     if let Ok(metadata) = entry.metadata() {
                         if self.min_age.as_secs() > 0 {
                             if let Ok(modified) = metadata.modified() {

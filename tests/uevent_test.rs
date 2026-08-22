@@ -19,21 +19,21 @@ mod tests {
             event
                 .properties
                 .get("POWER_SUPPLY_STATUS")
-                .map(|s| s.as_str()),
+                .map(String::as_str),
             Some("Charging")
         );
         assert_eq!(
             event
                 .properties
                 .get("POWER_SUPPLY_CAPACITY")
-                .map(|s| s.as_str()),
+                .map(String::as_str),
             Some("85")
         );
         assert_eq!(
             event
                 .properties
                 .get("POWER_SUPPLY_TEMP")
-                .map(|s| s.as_str()),
+                .map(String::as_str),
             Some("325")
         );
     }
@@ -46,14 +46,14 @@ mod tests {
         assert_eq!(event.action, "change");
         assert_eq!(event.subsystem, "backlight");
         assert_eq!(
-            event.properties.get("BRIGHTNESS").map(|s| s.as_str()),
+            event.properties.get("BRIGHTNESS").map(String::as_str),
             Some("120")
         );
         assert_eq!(
             event
                 .properties
                 .get("ACTUAL_BRIGHTNESS")
-                .map(|s| s.as_str()),
+                .map(String::as_str),
             Some("120")
         );
     }
@@ -79,18 +79,19 @@ mod tests {
 
     #[test]
     fn test_hardware_state_query_does_not_panic() {
-        let _charger = get_charger_state();
-        let _screen = get_screen_state();
+        let charger = get_charger_state();
+        let screen = get_screen_state();
         assert!(matches!(
-            _charger,
+            charger,
             ChargerState::Charging
                 | ChargerState::Discharging
                 | ChargerState::Full
                 | ChargerState::Unknown
         ));
         assert!(matches!(
-            _screen,
+            screen,
             ScreenState::On | ScreenState::Off | ScreenState::Unknown
         ));
     }
+
 }

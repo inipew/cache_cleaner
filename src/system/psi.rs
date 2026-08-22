@@ -92,6 +92,7 @@ impl PsiWatcher {
     }
 
     #[cfg(unix)]
+    #[must_use]
     pub fn get_raw_fds(&self) -> Vec<libc::c_int> {
         let mut fds = Vec::new();
         if let Some(fd) = self.moderate_fd {
@@ -105,6 +106,7 @@ impl PsiWatcher {
 
     /// Checks if a given FD belongs to this watcher and whether it is critical
     #[cfg(unix)]
+    #[must_use]
     pub fn identify_fd(&self, fd: libc::c_int) -> Option<PsiPressureLevel> {
         if Some(fd) == self.critical_fd {
             Some(PsiPressureLevel::Critical)
@@ -116,6 +118,7 @@ impl PsiWatcher {
     }
 
     /// Determines if enough cooldown time has elapsed since the last PSI response
+    #[must_use]
     pub fn can_respond(&self, cooldown_secs: u64) -> bool {
         self.last_response.elapsed() >= std::time::Duration::from_secs(cooldown_secs)
     }
@@ -141,26 +144,35 @@ impl Drop for PsiWatcher {
 }
 
 /// Checks if PSI is supported by the kernel
+#[must_use]
 pub fn is_psi_supported() -> bool {
     Path::new("/proc/pressure/memory").exists()
 }
 
 /// Reads and parses current Memory Pressure Stall Information from `/proc/pressure/memory`
+#[must_use]
 pub fn read_memory_pressure() -> Option<PsiMetrics> {
     parse_psi_file("/proc/pressure/memory")
 }
 
 /// Reads and parses current I/O Pressure Stall Information from `/proc/pressure/io`
+#[must_use]
 pub fn read_io_pressure() -> Option<PsiMetrics> {
     parse_psi_file("/proc/pressure/io")
 }
 
 /// Reads and parses current CPU Pressure Stall Information from `/proc/pressure/cpu`
+#[must_use]
 pub fn read_cpu_pressure() -> Option<PsiMetrics> {
     parse_psi_file("/proc/pressure/cpu")
 }
 
+
+#[cfg(unix)]
+use std::ffi::CString;
+
 /// Evaluates current pressure level based on instantaneous avg10 values
+#[must_use]
 pub fn evaluate_current_pressure_level() -> PsiPressureLevel {
     if let Some(mem) = read_memory_pressure() {
         if let Some(full) = mem.full {
@@ -176,6 +188,7 @@ pub fn evaluate_current_pressure_level() -> PsiPressureLevel {
 }
 
 /// Gathers comprehensive PSI diagnostics for status reporting and CLI
+#[must_use]
 pub fn get_psi_diagnostics() -> PsiDiagnostics {
     let supported = is_psi_supported();
     let mem = read_memory_pressure();
@@ -188,11 +201,12 @@ pub fn get_psi_diagnostics() -> PsiDiagnostics {
         memory_metrics: mem,
         io_metrics: io,
         cpu_metrics: cpu,
-        current_level: format!("{}", level),
+        current_level: format!("{level}"),
     }
 }
 
 /// Parses a PSI format string from `/proc/pressure/*`
+#[must_use]
 pub fn parse_psi_content(content: &str) -> Option<PsiMetrics> {
     let mut some_sample = None;
     let mut full_sample = None;
@@ -274,7 +288,6 @@ fn open_psi_trigger(
         return None;
     }
 
-    use std::ffi::CString;
     let c_path = CString::new(path).ok()?;
 
     let fd = unsafe {
@@ -288,11 +301,11 @@ fn open_psi_trigger(
         return None;
     }
 
-    let spec = format!("{} {} {}\0", trigger_type, stall_us, window_us);
+    let spec = format!("{trigger_type} {stall_us} {window_us}\0");
     let written = unsafe {
         libc::write(
             fd,
-            spec.as_ptr() as *const libc::c_void,
+            spec.as_ptr().cast::<libc::c_void>(),
             spec.len() - 1, // Exclude trailing null byte
         )
     };
@@ -304,3 +317,4 @@ fn open_psi_trigger(
 
     Some(fd)
 }
+

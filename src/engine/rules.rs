@@ -52,24 +52,25 @@ impl RuleEngine {
         let path_str = path.to_string_lossy();
 
         // 1. Safety Whitelist Check: NEVER touch protected critical files/directories
+        // Matches exact path component (e.g. "databases", "shared_prefs", "lib", "files", "keystore", "fpdata", ".nomedia")
+        // to prevent false positives where package names contain substrings (e.g. "com.libra.app" or "com.delivery.profiles").
         for protected in &self.safety.protected_substrings {
-            // Check if any path component exactly matches the protected pattern or path contains it
             if path
                 .components()
                 .any(|c| c.as_os_str() == protected.as_str())
-                || path_str.contains(protected)
             {
                 return JunkType::Ignored;
             }
         }
 
-        // Whitelist packages: Exact path segment match or prefix match
+        // Whitelist packages: Exact path segment match or prefix match (zero-allocation)
         let has_whitelisted_pkg = self.safety.whitelist_packages.iter().any(|pkg| {
             path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
-                s == pkg.as_str() || s.starts_with(&format!("{}.", pkg))
+                s == *pkg || s.strip_prefix(pkg.as_str()).is_some_and(|rest| rest.starts_with('.'))
             })
         });
+
 
         // Whitelisted packages protect all files except standard /cache subfolders
         let is_in_cache_folder = path.components().any(|c| {
@@ -359,7 +360,39 @@ mod tests {
             JunkType::Ignored
         );
         assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.whatsapp/lib/libtest.so")),
+            JunkType::Ignored
+        );
+        assert_eq!(
             engine.classify_path(Path::new("/data/media/0/Pictures/.nomedia")),
+            JunkType::Ignored
+        );
+
+        // Packages containing substrings "lib", "files", "database" must NOT be ignored in their cache folder
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.libra.browser/cache/cached_image.png")),
+            JunkType::AppCache
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.delivery.profiles/cache/tile.png")),
+            JunkType::AppCache
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.database.explorer/cache/query_cache.bin")),
+            JunkType::AppCache
+        );
+
+        // But protected subfolders inside those same packages must still be ignored
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.libra.browser/databases/bookmarks.db")),
+            JunkType::Ignored
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.libra.browser/lib/libengine.so")),
+            JunkType::Ignored
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/data/com.delivery.profiles/files/user.json")),
             JunkType::Ignored
         );
     }

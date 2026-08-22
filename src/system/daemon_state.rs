@@ -93,14 +93,14 @@ impl DaemonContext {
     pub fn get_state(&self) -> DaemonState {
         self.runtime
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .state
             .clone()
     }
 
     /// Update the current state enum
     pub fn set_state(&self, state: DaemonState) {
-        let mut rt = self.runtime.write().unwrap_or_else(|p| p.into_inner());
+        let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         rt.state = state;
     }
 
@@ -108,7 +108,7 @@ impl DaemonContext {
     pub fn is_shutdown_requested(&self) -> bool {
         self.runtime
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .shutdown_requested
     }
 
@@ -116,13 +116,13 @@ impl DaemonContext {
     pub fn is_cleaning(&self) -> bool {
         self.runtime
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_cleaning
     }
 
     /// Triggers immediate shutdown sequence
     pub fn trigger_shutdown(&self) {
-        let mut rt = self.runtime.write().unwrap_or_else(|p| p.into_inner());
+        let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         rt.shutdown_requested = true;
         rt.state = DaemonState::ShuttingDown;
         self.cancel_token.cancel();
@@ -142,7 +142,7 @@ impl DaemonContext {
         let sock_path = self
             .config
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .socket_path
             .clone();
         if !sock_path.is_empty() {
@@ -157,16 +157,16 @@ impl DaemonContext {
         let active_path = self
             .active_config_path
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let path_to_reload = active_path.as_deref();
         match DaemonConfig::reload_from_path(path_to_reload) {
             Ok(new_cfg) => {
                 self.clean_engine
                     .lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .update_config(new_cfg.clone());
-                *self.config.write().unwrap_or_else(|p| p.into_inner()) = new_cfg;
+                *self.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = new_cfg;
                 let msg = format!(
                     "Configuration reloaded successfully{}",
                     path_to_reload
@@ -192,7 +192,7 @@ impl DaemonContext {
         let cfg = self
             .config
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
 
         if cfg.require_screen_off {
@@ -231,7 +231,7 @@ impl DaemonContext {
     /// Spawns a scheduled background maintenance worker thread
     pub fn spawn_maintenance_worker(&self) {
         {
-            let mut rt = self.runtime.write().unwrap_or_else(|p| p.into_inner());
+            let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             if rt.shutdown_requested || rt.is_cleaning {
                 return;
             }
@@ -247,7 +247,7 @@ impl DaemonContext {
         let cfg = self
             .config
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
 
         let _ = std::thread::Builder::new()
@@ -263,7 +263,7 @@ impl DaemonContext {
 
                 log::info!("Starting background automatic maintenance cycle...");
                 let report = {
-                    let engine = clean_engine.lock().unwrap_or_else(|p| p.into_inner());
+                    let engine = clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     engine.execute(&params, &cancel_token)
                 };
 
@@ -273,7 +273,7 @@ impl DaemonContext {
                     .as_secs();
 
                 {
-                    let mut rt = runtime.write().unwrap_or_else(|p| p.into_inner());
+                    let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                     rt.last_cleaned_ts = Some(now_ts);
                     rt.last_freed_bytes = report.total_freed_bytes;
                     rt.total_freed_bytes += report.total_freed_bytes;
@@ -317,7 +317,7 @@ impl DaemonContext {
                 };
 
                 let metrics = crate::system::proc_metrics::get_process_metrics();
-                let rt = self.runtime.read().unwrap_or_else(|p| p.into_inner());
+                let rt = self.runtime.read().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 let status = DaemonStatus {
                     state: rt.state.to_string(),
@@ -338,7 +338,7 @@ impl DaemonContext {
             }
             Command::TriggerClean(params) => {
                 {
-                    let mut rt = self.runtime.write().unwrap_or_else(|p| p.into_inner());
+                    let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if rt.is_cleaning {
                         return Response::Error(
                             "Cleaning operation is already in progress".to_string(),
@@ -358,7 +358,7 @@ impl DaemonContext {
                 );
 
                 let report = {
-                    let engine = self.clean_engine.lock().unwrap_or_else(|p| p.into_inner());
+                    let engine = self.clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     engine.execute(&params, &self.cancel_token)
                 };
 
@@ -368,7 +368,7 @@ impl DaemonContext {
                     .as_secs();
 
                 {
-                    let mut rt = self.runtime.write().unwrap_or_else(|p| p.into_inner());
+                    let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                     rt.last_cleaned_ts = Some(now_ts);
                     rt.last_freed_bytes = report.total_freed_bytes;
                     rt.total_freed_bytes += report.total_freed_bytes;
@@ -388,7 +388,7 @@ impl DaemonContext {
             }
             Command::GetStats => {
                 let metrics = crate::system::proc_metrics::get_process_metrics();
-                let rt = self.runtime.read().unwrap_or_else(|p| p.into_inner());
+                let rt = self.runtime.read().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 let status = DaemonStatus {
                     state: rt.state.to_string(),

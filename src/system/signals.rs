@@ -20,50 +20,59 @@ impl SignalWatcher {
     pub fn create() -> std::io::Result<Self> {
         let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
         unsafe {
-            libc::sigemptyset(&mut mask);
-            libc::sigaddset(&mut mask, libc::SIGINT);
-            libc::sigaddset(&mut mask, libc::SIGTERM);
-            libc::sigaddset(&mut mask, libc::SIGHUP);
-            libc::sigaddset(&mut mask, libc::SIGQUIT);
+            libc::sigemptyset(&raw mut mask);
+            libc::sigaddset(&raw mut mask, libc::SIGINT);
+            libc::sigaddset(&raw mut mask, libc::SIGTERM);
+            libc::sigaddset(&raw mut mask, libc::SIGHUP);
+            libc::sigaddset(&raw mut mask, libc::SIGQUIT);
 
             // Block signals in this and all future spawned threads
-            let res = libc::pthread_sigmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
+            let res = libc::pthread_sigmask(libc::SIG_BLOCK, &raw const mask, std::ptr::null_mut());
             if res != 0 {
                 return Err(std::io::Error::from_raw_os_error(res));
             }
         }
 
-        let sfd = unsafe { libc::signalfd(-1, &mask, libc::SFD_NONBLOCK | libc::SFD_CLOEXEC) };
+        let sfd = unsafe { libc::signalfd(-1, &raw const mask, libc::SFD_NONBLOCK | libc::SFD_CLOEXEC) };
         if sfd < 0 {
             return Err(std::io::Error::last_os_error());
         }
 
-        log::info!("SignalFD watcher created (FD: {})", sfd);
+
+        log::info!("SignalFD watcher created (FD: {sfd})");
         Ok(Self { fd: sfd })
     }
 
-    pub fn fd(&self) -> RawFd {
+    #[must_use]
+    pub const fn fd(&self) -> RawFd {
         self.fd
     }
 
     /// Read pending signals without blocking
+    #[must_use]
     pub fn read_events(&self) -> Vec<SignalEvent> {
         let mut events = Vec::new();
         let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
         let info_size = std::mem::size_of::<libc::signalfd_siginfo>();
+        let expected_size = isize::try_from(info_size).unwrap_or(0);
 
         loop {
-            let n =
-                unsafe { libc::read(self.fd, &mut info as *mut _ as *mut libc::c_void, info_size) };
+            let n = unsafe {
+                libc::read(
+                    self.fd,
+                    std::ptr::addr_of_mut!(info).cast::<libc::c_void>(),
+                    info_size,
+                )
+            };
 
-            if n != info_size as isize {
+            if n != expected_size {
                 break;
             }
 
-            let signo = info.ssi_signo as i32;
+            let signo = info.ssi_signo.cast_signed();
             let event = match signo {
                 libc::SIGINT | libc::SIGTERM | libc::SIGQUIT => {
-                    log::info!("Received shutdown signal: {}", signo);
+                    log::info!("Received shutdown signal: {signo}");
                     SignalEvent::Shutdown
                 }
                 libc::SIGHUP => {
@@ -71,7 +80,7 @@ impl SignalWatcher {
                     SignalEvent::Reload
                 }
                 other => {
-                    log::debug!("Received unhandled signal: {}", other);
+                    log::debug!("Received unhandled signal: {other}");
                     SignalEvent::Other(other)
                 }
             };
@@ -80,6 +89,7 @@ impl SignalWatcher {
 
         events
     }
+
 }
 
 #[cfg(unix)]
