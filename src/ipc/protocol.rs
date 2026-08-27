@@ -49,33 +49,85 @@ pub struct DaemonStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StorageReport {
+    pub total_freed_bytes: u64,
+    pub deleted_files_count: usize,
+    pub skipped_files_count: usize,
+    pub errors_count: usize,
+    pub app_cache_bytes: u64,
+    pub oem_logs_bytes: u64,
+    pub crash_dumps_bytes: u64,
+    pub temp_apks_bytes: u64,
+    pub frozen_apps_cleaned: usize,
+    pub active_apps_cleaned: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MemoryReport {
+    pub memory_compacted: bool,
+    pub zram_compacted: bool,
+    pub cgroup_memory_reclaimed: bool,
+    pub reclaimed_mb: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrimReport {
+    pub fstrim_completed: bool,
+    pub trimmed_mounts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OptimizationReport {
+    pub f2fs_gc_activated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlanEntry {
+    pub path: String,
+    pub category: String,
+    pub size_bytes: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CleanReport {
+    pub storage: StorageReport,
+    pub memory: MemoryReport,
+    pub trim: TrimReport,
+    pub optimization: OptimizationReport,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_entries: Option<Vec<PlanEntry>>,
+
+    // Flat compatibility fields
+    pub total_freed_bytes: u64,
+    pub deleted_files_count: usize,
     pub app_cache_freed_bytes: u64,
     pub oem_logs_freed_bytes: u64,
     pub crash_dumps_freed_bytes: u64,
     pub temp_apks_freed_bytes: u64,
-    pub total_freed_bytes: u64,
-    pub deleted_files_count: usize,
+    pub skipped_files_count: usize,
+    pub errors_count: usize,
     pub frozen_apps_cleaned: usize,
     pub active_apps_cleaned: usize,
     pub memory_compacted: bool,
     pub zram_compacted: bool,
     pub cgroup_memory_reclaimed: bool,
     pub fstrim_completed: bool,
-    pub skipped_files_count: usize,
-    pub errors_count: usize,
-    pub duration_ms: u64,
 }
 
 impl CleanReport {
     /// Accumulates walk stats for multi-user app cache passes
     pub fn record_app_cache_stats(&mut self, stats: &crate::engine::walker::WalkStats) {
-        self.app_cache_freed_bytes += stats.bytes_freed;
-        self.deleted_files_count += stats.files_deleted;
-        self.frozen_apps_cleaned += stats.frozen_apps_affected;
-        self.active_apps_cleaned += stats.active_apps_affected;
-        self.skipped_files_count += stats.skipped_files;
-        self.errors_count += stats.errors_count;
+        self.storage.app_cache_bytes += stats.bytes_freed;
+        self.storage.total_freed_bytes += stats.bytes_freed;
+        self.storage.deleted_files_count += stats.files_deleted;
+        self.storage.frozen_apps_cleaned += stats.frozen_apps_affected;
+        self.storage.active_apps_cleaned += stats.active_apps_affected;
+        self.storage.skipped_files_count += stats.skipped_files;
+        self.storage.errors_count += stats.errors_count;
+
+        self.sync_compat_fields();
     }
 
     /// Accumulates walk stats categorized by system junk target path
@@ -90,30 +142,48 @@ impl CleanReport {
             || target.contains("vivo")
             || target.contains("hilog")
         {
-            self.oem_logs_freed_bytes += stats.bytes_freed;
+            self.storage.oem_logs_bytes += stats.bytes_freed;
         } else if target.contains("tombstones")
             || target.contains("anr")
             || target.contains("dropbox")
         {
-            self.crash_dumps_freed_bytes += stats.bytes_freed;
+            self.storage.crash_dumps_bytes += stats.bytes_freed;
         } else if target.contains("app-staging")
             || target.contains("tmp")
             || target.contains("package_cache")
         {
-            self.temp_apks_freed_bytes += stats.bytes_freed;
+            self.storage.temp_apks_bytes += stats.bytes_freed;
         }
 
-        self.deleted_files_count += stats.files_deleted;
-        self.skipped_files_count += stats.skipped_files;
-        self.errors_count += stats.errors_count;
+        self.storage.total_freed_bytes += stats.bytes_freed;
+        self.storage.deleted_files_count += stats.files_deleted;
+        self.storage.skipped_files_count += stats.skipped_files;
+        self.storage.errors_count += stats.errors_count;
+
+        self.sync_compat_fields();
     }
 
-    /// Calculates total freed bytes from subcategories and sets job duration
+    /// Synchronizes flat compatibility fields from nested domain reports
+    fn sync_compat_fields(&mut self) {
+        self.total_freed_bytes = self.storage.total_freed_bytes;
+        self.deleted_files_count = self.storage.deleted_files_count;
+        self.app_cache_freed_bytes = self.storage.app_cache_bytes;
+        self.oem_logs_freed_bytes = self.storage.oem_logs_bytes;
+        self.crash_dumps_freed_bytes = self.storage.crash_dumps_bytes;
+        self.temp_apks_freed_bytes = self.storage.temp_apks_bytes;
+        self.skipped_files_count = self.storage.skipped_files_count;
+        self.errors_count = self.storage.errors_count;
+        self.frozen_apps_cleaned = self.storage.frozen_apps_cleaned;
+        self.active_apps_cleaned = self.storage.active_apps_cleaned;
+        self.memory_compacted = self.memory.memory_compacted;
+        self.zram_compacted = self.memory.zram_compacted;
+        self.cgroup_memory_reclaimed = self.memory.cgroup_memory_reclaimed;
+        self.fstrim_completed = self.trim.fstrim_completed;
+    }
+
+    /// Calculates total freed bytes and sets job duration
     pub fn finalize_totals(&mut self, duration_ms: u64) {
-        self.total_freed_bytes = self.app_cache_freed_bytes
-            + self.oem_logs_freed_bytes
-            + self.crash_dumps_freed_bytes
-            + self.temp_apks_freed_bytes;
+        self.sync_compat_fields();
         self.duration_ms = duration_ms;
     }
 }

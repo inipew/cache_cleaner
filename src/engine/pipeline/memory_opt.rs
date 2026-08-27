@@ -17,15 +17,24 @@ impl CleanStage for MemoryOptStage {
         // 1. ZRAM & Memory Compaction
         if ctx.params.zram_compact || ctx.config.optimization.zram_compaction {
             if ctx.config.optimization.compact_memory {
-                report.memory_compacted = MemoryOptimizer::compact_memory();
+                let ok = MemoryOptimizer::compact_memory();
+                report.memory.memory_compacted = ok;
+                report.memory_compacted = ok;
             }
-            report.zram_compacted = MemoryOptimizer::compact_zram();
+            let zram_ok = MemoryOptimizer::compact_zram();
+            report.memory.zram_compacted = zram_ok;
+            report.zram_compacted = zram_ok;
         }
 
         // 2. Cgroup v2 Inactive Memory Reclaim
         if ctx.params.deep || ctx.config.optimization.cgroup_memory_reclaim {
             let target_mb = ctx.config.optimization.cgroup_reclaim_amount_mb;
-            report.cgroup_memory_reclaimed = MemoryOptimizer::reclaim_cgroup_memory(target_mb);
+            let reclaim_ok = MemoryOptimizer::reclaim_cgroup_memory(target_mb);
+            report.memory.cgroup_memory_reclaimed = reclaim_ok;
+            report.cgroup_memory_reclaimed = reclaim_ok;
+            if reclaim_ok {
+                report.memory.reclaimed_mb = target_mb;
+            }
         }
     }
 }

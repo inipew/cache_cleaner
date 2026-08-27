@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::config::{CleaningRulesConfig, SafetyConfig};
+use crate::config::{CleaningRulesConfig, SafetyConfig, SafetyMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JunkCategory {
@@ -164,7 +164,23 @@ impl RuleEngine {
     pub fn evaluate_path(&self, path: &Path) -> Decision {
         let path_str = path.to_string_lossy();
 
-        // 1. Safety Protected Directories Check: Exact path component match
+        // 1. Absolute Deny: System / Immutable partition protection
+        if path.starts_with("/system")
+            || path.starts_with("/vendor")
+            || path.starts_with("/apex")
+            || path.starts_with("/product")
+            || path.starts_with("/system_ext")
+            || path.starts_with("/etc")
+            || path.starts_with("/proc")
+            || path.starts_with("/sys")
+            || path.starts_with("/dev")
+        {
+            return Decision::Skip {
+                reason: SkipReason::ProtectedDirectory("system_immutable_partition".to_string()),
+            };
+        }
+
+        // 2. Absolute Deny: Safety Protected Directory component match
         // E.g. "databases", "shared_prefs", "lib", "files", "keystore", "fpdata", ".nomedia"
         for protected in &self.safety.protected_directory_names {
             if path
@@ -177,7 +193,7 @@ impl RuleEngine {
             }
         }
 
-        // Whitelist packages: Exact path segment match or dot-separated component match
+        // 3. Absolute Deny: Whitelisted packages are 100% immune from any deletion
         for pkg in &self.safety.whitelist_packages {
             let matches_pkg = path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
@@ -185,20 +201,13 @@ impl RuleEngine {
             });
 
             if matches_pkg {
-                let is_in_cache_folder = path.components().any(|c| {
-                    let s = c.as_os_str().to_string_lossy();
-                    s == "cache" || s == "app_cache"
-                });
-
-                if !is_in_cache_folder {
-                    return Decision::Skip {
-                        reason: SkipReason::WhitelistedPackage(pkg.clone()),
-                    };
-                }
+                return Decision::Skip {
+                    reason: SkipReason::WhitelistedPackage(pkg.clone()),
+                };
             }
         }
 
-        // 2. Strict JIT / ART Code Cache Protection
+        // 2. Strict JIT / ART Code Cache Protection (NEVER in Safe or Balanced modes)
         let is_jit_or_art = path.components().any(|c| {
             let s = c.as_os_str().to_string_lossy();
             s == "code_cache" || s == "oat" || s == "dalvik-cache"
@@ -210,10 +219,10 @@ impl RuleEngine {
             || path_str.ends_with(".vdex");
 
         if is_jit_or_art {
-            if self.rules.clean_code_cache {
+            if self.safety.mode == SafetyMode::Aggressive && self.rules.clean_code_cache {
                 return Decision::Delete {
                     category: JunkCategory::CodeCache,
-                    reason: "ART/JIT code cache enabled in config",
+                    reason: "ART/JIT code cache enabled in config under aggressive safety mode",
                 };
             } else {
                 return Decision::Skip {
@@ -274,31 +283,7 @@ impl RuleEngine {
             }
         }
 
-        // C. Thumbnail caches
-        let is_thumbnail = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == ".thumbnails"
-                || s == ".thumb"
-                || s == ".thumbcache"
-                || s == ".video_thumbnails"
-                || s == ".albumthumbs"
-                || s == "micro_thumbnail"
-        });
-
-        if is_thumbnail {
-            if self.rules.clean_thumbnails {
-                return Decision::Delete {
-                    category: JunkCategory::Thumbnail,
-                    reason: "Media thumbnail cache folder",
-                };
-            } else {
-                return Decision::Skip {
-                    reason: SkipReason::DisabledByConfig("clean_thumbnails"),
-                };
-            }
-        }
-
-        // D. App internal/external cache folder
+        // C. App internal/external cache folder
         let is_in_cache_folder = path.components().any(|c| {
             let s = c.as_os_str().to_string_lossy();
             s == "cache" || s == "app_cache"
@@ -317,9 +302,47 @@ impl RuleEngine {
             }
         }
 
-        // E. OEM Vendor Logs
+        // Categories below require at least Balanced or Aggressive SafetyMode
+
+        // D. Thumbnail caches (Balanced or Aggressive only)
+        let is_thumbnail = path.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s == ".thumbnails"
+                || s == ".thumb"
+                || s == ".thumbcache"
+                || s == ".video_thumbnails"
+                || s == ".albumthumbs"
+                || s == "micro_thumbnail"
+        });
+
+        if is_thumbnail {
+            if self.safety.mode == SafetyMode::Safe {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("thumbnails_disabled_in_safe_mode"),
+                };
+            }
+            if self.rules.clean_thumbnails {
+                return Decision::Delete {
+                    category: JunkCategory::Thumbnail,
+                    reason: "Media thumbnail cache folder",
+                };
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_thumbnails"),
+                };
+            }
+        }
+
+        // Categories below require Aggressive SafetyMode (OEM logs, crash dumps, temp APKs)
+
+        // E. OEM Vendor Logs (Aggressive only)
         let is_oem_log_root = OEM_LOG_ROOTS.iter().any(|root| path.starts_with(root));
         if is_oem_log_root {
+            if self.safety.mode != SafetyMode::Aggressive {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("oem_logs_require_aggressive_mode"),
+                };
+            }
             if self.rules.clean_oem_logs {
                 // Safe OEM log pattern filtering
                 let is_log_file = path_str.ends_with(".log")
@@ -347,9 +370,14 @@ impl RuleEngine {
             }
         }
 
-        // F. Crash Dumps, ANR, and DropBox
+        // F. Crash Dumps, ANR, and DropBox (Aggressive only)
         let is_crash_dump_root = CRASH_DUMP_ROOTS.iter().any(|root| path.starts_with(root));
         if is_crash_dump_root {
+            if self.safety.mode != SafetyMode::Aggressive {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("crash_dumps_require_aggressive_mode"),
+                };
+            }
             if self.rules.clean_crash_dumps {
                 return Decision::Delete {
                     category: JunkCategory::CrashDump,
@@ -362,20 +390,37 @@ impl RuleEngine {
             }
         }
 
-        // G. Temporary APKs & Staged APKs
-        let is_staged_apk = STAGED_APK_ROOTS.iter().any(|root| path.starts_with(root));
-        if is_staged_apk {
-            if self.rules.clean_temp_apks {
-                return Decision::Delete {
-                    category: JunkCategory::TempApk,
-                    reason: "Staged package install cache",
+        // G. Temporary APKs and Split Dex files (Aggressive only)
+        let is_temp_apk_root = STAGED_APK_ROOTS.iter().any(|root| path.starts_with(root));
+        if is_temp_apk_root {
+            if self.safety.mode != SafetyMode::Aggressive {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("temp_apks_require_aggressive_mode"),
                 };
+            }
+            if self.rules.clean_temp_apks {
+                let is_apk_artifact = path_str.ends_with(".apk")
+                    || path_str.ends_with(".dex")
+                    || path_str.ends_with(".tmp")
+                    || path_str.ends_with(".apk.tmp");
+
+                if is_apk_artifact || !path.is_file() {
+                    return Decision::Delete {
+                        category: JunkCategory::TempApk,
+                        reason: "Temporary APK installation session artifact",
+                    };
+                }
             } else {
                 return Decision::Skip {
                     reason: SkipReason::DisabledByConfig("clean_temp_apks"),
                 };
             }
         } else if path.starts_with("/data/local/tmp") {
+            if self.safety.mode != SafetyMode::Aggressive {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("temp_apks_require_aggressive_mode"),
+                };
+            }
             let is_temp_artifact = path_str.ends_with(".apk")
                 || path_str.ends_with(".tmp")
                 || path_str.ends_with(".apks")
@@ -540,7 +585,10 @@ mod tests {
             clean_oem_logs: true,
             ..Default::default()
         };
-        let safety = SafetyConfig::default();
+        let safety = SafetyConfig {
+            mode: SafetyMode::Aggressive,
+            ..Default::default()
+        };
         let engine = RuleEngine::new(rules, safety);
 
         assert_eq!(
@@ -625,7 +673,10 @@ mod tests {
             clean_temp_apks: true,
             ..Default::default()
         };
-        let safety = SafetyConfig::default();
+        let safety = SafetyConfig {
+            mode: SafetyMode::Aggressive,
+            ..Default::default()
+        };
         let engine = RuleEngine::new(rules, safety);
 
         assert_eq!(

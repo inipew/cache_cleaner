@@ -129,8 +129,23 @@ pub struct OptimizationConfig {
     pub trim_mount_points: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SafetyMode {
+    Safe,       // Strict canonical app cache only, min age >= 24h, UID check
+    Balanced,   // Adds WebView, Image Cache, Thumbnails
+    Aggressive, // Adds OEM logs, Crash dumps, Temp APKs
+}
+
+fn default_safety_mode() -> SafetyMode {
+    SafetyMode::Safe
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyConfig {
+    #[serde(default = "default_safety_mode")]
+    pub mode: SafetyMode,
+
     #[serde(default = "default_whitelist_packages")]
     pub whitelist_packages: Vec<String>,
 
@@ -261,6 +276,7 @@ impl Default for OptimizationConfig {
 impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
+            mode: default_safety_mode(),
             whitelist_packages: default_whitelist_packages(),
             protected_directory_names: default_protected_directory_names(),
         }

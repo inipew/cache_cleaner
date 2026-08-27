@@ -57,6 +57,10 @@ pub enum Commands {
         /// Dry-run mode: scan and calculate freed space without deleting files
         #[arg(short = 'n', long)]
         dry_run: bool,
+
+        /// Output report in structured JSON format
+        #[arg(long)]
+        json: bool,
     },
 
     /// Query daemon status via IPC or PID lock

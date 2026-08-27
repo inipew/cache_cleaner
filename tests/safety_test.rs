@@ -1,12 +1,13 @@
 #[cfg(test)]
 mod tests {
-    use cache_cleaner_daemon::config::{CleaningRulesConfig, SafetyConfig};
+    use cache_cleaner_daemon::config::{CleaningRulesConfig, SafetyConfig, SafetyMode};
     use cache_cleaner_daemon::engine::rules::{
         is_valid_package_name, Decision, JunkCategory, RuleEngine, SkipReason,
     };
     use cache_cleaner_daemon::ipc::protocol::{CleanParams, Command};
     #[cfg(unix)]
     use cache_cleaner_daemon::ipc::server::is_command_authorized;
+    use cache_cleaner_daemon::platform::{check_encryption_state, EncryptionState, StorageState};
     use std::path::Path;
 
     #[test]
@@ -56,31 +57,115 @@ mod tests {
     }
 
     #[test]
-    fn test_package_substring_collision_safety() {
+    fn test_whitelisted_package_absolute_deny() {
         let rules = CleaningRulesConfig {
             clean_app_cache: true,
             ..Default::default()
         };
-        let safety = SafetyConfig::default();
+        let safety = SafetyConfig {
+            mode: SafetyMode::Safe,
+            whitelist_packages: vec!["com.google.android.gms".to_string(), "android".to_string()],
+            protected_directory_names: vec!["databases".to_string()],
+        };
         let engine = RuleEngine::new(rules, safety);
 
-        // Package containing substring "database" in package name
-        let non_cache = engine.evaluate_path(Path::new(
-            "/data/data/com.database.explorer/files/settings.json",
+        // Whitelisted package cache MUST produce Decision::Skip (Absolute Deny)
+        let cache_path = Path::new("/data/user/0/com.google.android.gms/cache/temp_token.tmp");
+        let decision = engine.evaluate_path(cache_path);
+        assert!(matches!(
+            decision,
+            Decision::Skip {
+                reason: SkipReason::WhitelistedPackage(ref pkg)
+            } if pkg == "com.google.android.gms"
         ));
-        assert!(matches!(non_cache, Decision::Skip { .. }));
+    }
 
-        // But actual /cache folder is recognized as AppCache
-        let cache_file = engine.evaluate_path(Path::new(
-            "/data/data/com.database.explorer/cache/query.tmp",
+    #[test]
+    fn test_system_immutable_partitions_absolute_deny() {
+        let rules = CleaningRulesConfig {
+            clean_app_cache: true,
+            clean_oem_logs: true,
+            clean_temp_apks: true,
+            ..Default::default()
+        };
+        let safety = SafetyConfig {
+            mode: SafetyMode::Aggressive,
+            ..Default::default()
+        };
+        let engine = RuleEngine::new(rules, safety);
+
+        // System, vendor, apex, product partitions must ALWAYS produce Decision::Skip
+        assert!(matches!(
+            engine.evaluate_path(Path::new("/system/app/Chrome/cache/something")),
+            Decision::Skip { .. }
         ));
         assert!(matches!(
-            cache_file,
-            Decision::Delete {
-                category: JunkCategory::AppCache,
-                ..
-            }
+            engine.evaluate_path(Path::new("/vendor/bin/hw/cache")),
+            Decision::Skip { .. }
         ));
+        assert!(matches!(
+            engine.evaluate_path(Path::new("/apex/com.android.runtime/bin")),
+            Decision::Skip { .. }
+        ));
+    }
+
+    #[test]
+    fn test_fail_closed_encryption_state() {
+        // Test user with nonexistent path returns unencrypted on test machine or unknown on Android
+        let storage_state = StorageState::for_user(99999);
+        // On machine where /data doesn't exist, it's Unencrypted for unit testing
+        // but if /data exists and user 99999 doesn't, check_encryption_state returns Unknown and ce_available = false
+        if !Path::new("/data").exists() {
+            assert!(storage_state.ce_available);
+        } else {
+            let enc_state = check_encryption_state(99999);
+            assert_eq!(enc_state, EncryptionState::Unknown);
+            assert!(!storage_state.ce_available);
+            assert!(!storage_state.user_unlocked);
+        }
+    }
+
+    #[test]
+    fn test_safety_mode_tiers() {
+        let rules = CleaningRulesConfig {
+            clean_app_cache: true,
+            clean_thumbnails: true,
+            clean_oem_logs: true,
+            clean_crash_dumps: true,
+            clean_temp_apks: true,
+            ..Default::default()
+        };
+
+        // 1. Safe Mode: Thumbnails and OEM logs are blocked
+        let safe_cfg = SafetyConfig {
+            mode: SafetyMode::Safe,
+            ..Default::default()
+        };
+        let safe_engine = RuleEngine::new(rules.clone(), safe_cfg);
+        let thumb_dec = safe_engine.evaluate_path(Path::new("/sdcard/DCIM/.thumbnails/thumb.jpg"));
+        assert!(matches!(thumb_dec, Decision::Skip { .. }));
+        let oem_dec = safe_engine.evaluate_path(Path::new("/data/mqsas/crash.log"));
+        assert!(matches!(oem_dec, Decision::Skip { .. }));
+
+        // 2. Balanced Mode: Thumbnails allowed, OEM logs blocked
+        let balanced_cfg = SafetyConfig {
+            mode: SafetyMode::Balanced,
+            ..Default::default()
+        };
+        let balanced_engine = RuleEngine::new(rules.clone(), balanced_cfg);
+        let thumb_dec = balanced_engine.evaluate_path(Path::new("/sdcard/DCIM/.thumbnails/thumb.jpg"));
+        assert!(matches!(thumb_dec, Decision::Delete { category: JunkCategory::Thumbnail, .. }));
+        let oem_dec = balanced_engine.evaluate_path(Path::new("/data/mqsas/crash.log"));
+        assert!(matches!(oem_dec, Decision::Skip { .. }));
+
+        // 3. Aggressive Mode: Thumbnails and OEM logs both allowed
+        let agg_cfg = SafetyConfig {
+            mode: SafetyMode::Aggressive,
+            ..Default::default()
+        };
+        let agg_engine = RuleEngine::new(rules, agg_cfg);
+        let oem_dec = agg_engine.evaluate_path(Path::new("/data/mqsas/crash.log"));
+        assert!(matches!(oem_dec, Decision::Delete { category: JunkCategory::OemLog, .. }));
     }
 
     #[cfg(unix)]

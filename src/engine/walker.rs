@@ -26,6 +26,38 @@ fn st_mtime_to_duration<T: TryInto<u64>>(st_mtime: T) -> Duration {
     Duration::from_secs(st_mtime.try_into().unwrap_or(0))
 }
 
+#[cfg(unix)]
+#[inline]
+fn safe_unlink_entry<Fd: rustix::fd::AsFd>(
+    dir_fd: &Fd,
+    name: &str,
+    expected_dev: u64,
+    expected_ino: u64,
+    expected_ft: FileType,
+    flags: AtFlags,
+) -> bool {
+    // Inode Identity Revalidation immediately prior to unlinkat:
+    // Guarantees device ID, inode number, and file mode have not been swapped by an adversary/race
+    if let Ok(st_latest) = statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        if (st_latest.st_dev as u64) != expected_dev {
+            log::warn!("Aborting unlink: st_dev mismatch on {}", name);
+            return false;
+        }
+        if st_latest.st_ino != expected_ino {
+            log::warn!("Aborting unlink: st_ino changed between stat and unlink on {}", name);
+            return false;
+        }
+        let current_ft = FileType::from_raw_mode(st_latest.st_mode);
+        if current_ft != expected_ft {
+            log::warn!("Aborting unlink: FileType mutated on {}", name);
+            return false;
+        }
+        unlinkat(dir_fd, name, flags).is_ok()
+    } else {
+        false
+    }
+}
+
 pub struct DirectoryWalker<'a> {
     rule_engine: &'a RuleEngine,
     cancel_token: &'a CancellationToken,
@@ -130,7 +162,7 @@ impl<'a> DirectoryWalker<'a> {
                 }
             };
 
-            let mut crash_files: Vec<(String, u64, SystemTime)> = Vec::new();
+            let mut crash_files: Vec<(String, u64, SystemTime, u64, u64)> = Vec::new();
             let mut buf = [MaybeUninit::uninit(); 8192];
             let mut raw_dir = RawDir::new(&dir_fd, &mut buf);
 
@@ -154,6 +186,8 @@ impl<'a> DirectoryWalker<'a> {
                                     name_str.to_string(),
                                     st.st_size as u64,
                                     mtime,
+                                    st.st_dev as u64,
+                                    st.st_ino,
                                 ));
                             }
                         }
@@ -164,14 +198,14 @@ impl<'a> DirectoryWalker<'a> {
             // Sort descending by modified time (newest first)
             crash_files.sort_by_key(|b| std::cmp::Reverse(b.2));
 
-            // Skip newest `keep_count` files, delete older ones via fd-relative unlinkat
-            for (name, size, _) in crash_files.into_iter().skip(keep_count) {
+            // Skip newest `keep_count` files, delete older ones via fd-relative unlinkat with inode revalidation
+            for (name, size, _, dev, ino) in crash_files.into_iter().skip(keep_count) {
                 if self.cancel_token.is_cancelled() {
                     break;
                 }
 
                 if !self.dry_run {
-                    if unlinkat(&dir_fd, &name, AtFlags::empty()).is_ok() {
+                    if safe_unlink_entry(&dir_fd, &name, dev, ino, FileType::RegularFile, AtFlags::empty()) {
                         stats.files_deleted += 1;
                         stats.bytes_freed += size;
                     } else {
@@ -330,7 +364,7 @@ impl<'a> DirectoryWalker<'a> {
                     Decision::Delete { .. } => {
                         if file_type == FileType::Symlink {
                             if !self.dry_run {
-                                if unlinkat(&dir_fd, name_str, AtFlags::empty()).is_ok() {
+                                if safe_unlink_entry(&dir_fd, name_str, root_dev, st.st_ino, FileType::Symlink, AtFlags::empty()) {
                                     stats.files_deleted += 1;
                                 } else {
                                     stats.errors_count += 1;
@@ -360,7 +394,7 @@ impl<'a> DirectoryWalker<'a> {
                             }
 
                             if !self.dry_run {
-                                if unlinkat(&dir_fd, name_str, AtFlags::empty()).is_ok() {
+                                if safe_unlink_entry(&dir_fd, name_str, root_dev, st.st_ino, FileType::RegularFile, AtFlags::empty()) {
                                     stats.files_deleted += 1;
                                     stats.bytes_freed += file_size;
                                 } else {
@@ -529,7 +563,7 @@ impl<'a> DirectoryWalker<'a> {
 
                 if file_type == FileType::Symlink {
                     if !self.dry_run {
-                        if unlinkat(&dir_fd, name_str, AtFlags::empty()).is_ok() {
+                        if safe_unlink_entry(&dir_fd, name_str, root_dev, st.st_ino, FileType::Symlink, AtFlags::empty()) {
                             stats.files_deleted += 1;
                         } else {
                             stats.errors_count += 1;
@@ -540,7 +574,7 @@ impl<'a> DirectoryWalker<'a> {
                 } else if file_type == FileType::Directory {
                     self.purge_folder_contents(&p, root_dev, stats, depth + 1);
                     if !self.dry_run {
-                        let _ = unlinkat(&dir_fd, name_str, AtFlags::REMOVEDIR);
+                        let _ = safe_unlink_entry(&dir_fd, name_str, root_dev, st.st_ino, FileType::Directory, AtFlags::REMOVEDIR);
                     }
                 } else if file_type == FileType::RegularFile {
                     if self.min_age.as_secs() > 0 {
@@ -560,7 +594,7 @@ impl<'a> DirectoryWalker<'a> {
 
                     let size = st.st_size as u64;
                     if !self.dry_run {
-                        if unlinkat(&dir_fd, name_str, AtFlags::empty()).is_ok() {
+                        if safe_unlink_entry(&dir_fd, name_str, root_dev, st.st_ino, FileType::RegularFile, AtFlags::empty()) {
                             stats.files_deleted += 1;
                             stats.bytes_freed += size;
                         } else {

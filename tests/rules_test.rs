@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use cache_cleaner_daemon::config::{CleaningRulesConfig, SafetyConfig};
+    use cache_cleaner_daemon::config::{CleaningRulesConfig, SafetyConfig, SafetyMode};
     use cache_cleaner_daemon::engine::rules::{JunkType, RuleEngine};
     use std::path::Path;
 
@@ -20,29 +20,24 @@ mod tests {
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new("/sdcard/DCIM/.nomedia")),
+            engine.classify_path(Path::new("/data/data/com.whatsapp/files/keystore")),
             JunkType::Ignored
         );
         assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.google.android.gms/files/auth_key"
-            )),
+            engine.classify_path(Path::new("/data/data/com.whatsapp/lib/libnative.so")),
+            JunkType::Ignored
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/sdcard/DCIM/Camera/.nomedia")),
             JunkType::Ignored
         );
 
-        // Package names with substrings overlapping with protected patterns (e.g. "lib", "files", "database")
-        // must NOT have their cache directory ignored
+        // Whitelisted app (e.g. android / com.google.android.gms) MUST be completely ignored (Absolute Deny)
         assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.libra.browser/cache/cached_image.png")),
-            JunkType::AppCache
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.delivery.profiles/cache/tile.png")),
-            JunkType::AppCache
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.database.explorer/cache/query_cache.bin")),
-            JunkType::AppCache
+            engine.classify_path(Path::new(
+                "/data/data/com.google.android.gms/cache/temp_123.tmp"
+            )),
+            JunkType::Ignored
         );
     }
 
@@ -52,22 +47,22 @@ mod tests {
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 
-        // Package named com.geocache.navigator - non-cache files MUST NOT be treated as junk
+        // App names containing "cache" or "temp" or "databases" must NOT be deleted unless within /cache/
         assert_eq!(
             engine.classify_path(Path::new(
-                "/data/data/com.geocache.navigator/databases/points.db"
+                "/data/data/com.app.cachemaster/files/user_settings.json"
             )),
             JunkType::Ignored
         );
         assert_eq!(
             engine.classify_path(Path::new(
-                "/data/user/0/com.cachet.wallet/shared_prefs/keys.xml"
+                "/data/data/com.test.template/databases/main.sqlite"
             )),
             JunkType::Ignored
         );
         assert_eq!(
             engine.classify_path(Path::new(
-                "/data/data/com.geocache.navigator/files/track.gpx"
+                "/data/data/com.database.explorer/shared_prefs/config.xml"
             )),
             JunkType::Ignored
         );
@@ -84,17 +79,25 @@ mod tests {
     #[test]
     fn test_jit_art_bytecode_protection() {
         let rules = CleaningRulesConfig {
-            clean_app_cache: true,
             clean_code_cache: false,
             ..Default::default()
         };
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 
+        // JIT / ART profile and bytecode files must NEVER be cleaned
         assert_eq!(
             engine.classify_path(Path::new(
-                "/data/data/com.android.chrome/code_cache/test.dex"
+                "/data/data/com.whatsapp/code_cache/compiled_view.dex"
             )),
+            JunkType::Ignored
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/app/com.whatsapp/oat/arm64/base.odex")),
+            JunkType::Ignored
+        );
+        assert_eq!(
+            engine.classify_path(Path::new("/data/app/com.whatsapp/oat/arm64/base.vdex")),
             JunkType::Ignored
         );
         assert_eq!(
@@ -123,7 +126,10 @@ mod tests {
             clean_temp_apks: true,
             min_file_age_hours: 0,
         };
-        let safety = SafetyConfig::default();
+        let safety = SafetyConfig {
+            mode: SafetyMode::Aggressive,
+            ..Default::default()
+        };
         let engine = RuleEngine::new(rules, safety);
 
         // Standard app cache

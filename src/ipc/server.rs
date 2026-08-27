@@ -119,9 +119,24 @@ impl IpcServer {
                     }
                 };
 
-                // Check active worker concurrency limit to protect against thread exhaustion DoS
-                let current_workers = self.active_workers.load(Ordering::Relaxed);
-                if current_workers >= MAX_CONCURRENT_IPC_WORKERS {
+                // Atomic CAS Worker Limiter: guarantees zero race window on worker threshold
+                let mut current = self.active_workers.load(Ordering::Relaxed);
+                let acquired = loop {
+                    if current >= MAX_CONCURRENT_IPC_WORKERS {
+                        break false;
+                    }
+                    match self.active_workers.compare_exchange_weak(
+                        current,
+                        current + 1,
+                        Ordering::SeqCst,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break true,
+                        Err(actual) => current = actual,
+                    }
+                };
+
+                if !acquired {
                     log::warn!(
                         "IPC connection rejected: max worker limit reached ({})",
                         MAX_CONCURRENT_IPC_WORKERS
@@ -135,7 +150,6 @@ impl IpcServer {
                     continue;
                 }
 
-                self.active_workers.fetch_add(1, Ordering::SeqCst);
                 let worker_guard = WorkerGuard(self.active_workers.clone());
                 let handler_clone = handler.clone();
 

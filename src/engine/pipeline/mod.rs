@@ -51,6 +51,9 @@ impl CleanPipeline {
     }
 
     pub fn execute(&self, ctx: &PipelineContext, report: &mut CleanReport) {
+        // Apply low CPU & I/O scheduling priorities specifically on the cleaning worker thread
+        crate::system::governor::set_idle_priorities();
+
         for stage in &self.stages {
             if ctx.cancel_token.is_cancelled() {
                 log::warn!("Clean pipeline preempted before stage: {}", stage.name());

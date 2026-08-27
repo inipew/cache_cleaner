@@ -34,8 +34,9 @@ pub fn dispatch_command(cli: Cli) {
             trim,
             zram,
             dry_run,
+            json,
         } => {
-            clean::execute_clean(config, deep, trim, zram, dry_run);
+            clean::execute_clean(config, deep, trim, zram, dry_run, json);
         }
 
         Commands::Status => {
