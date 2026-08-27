@@ -97,16 +97,8 @@ pub fn read_thermal() -> ThermalReport {
         }
     }
 
-    if max_soc == 0.0 {
-        max_soc = if fallback_max_temp > 0.0 {
-            fallback_max_temp
-        } else {
-            35.0
-        };
-    }
-
-    if battery_temp == 0.0 {
-        battery_temp = 30.0;
+    if max_soc == 0.0 && fallback_max_temp > 0.0 {
+        max_soc = fallback_max_temp;
     }
 
     ThermalReport {

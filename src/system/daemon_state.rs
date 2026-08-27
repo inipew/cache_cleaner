@@ -323,18 +323,25 @@ impl DaemonContext {
                 let io_psi = crate::system::psi::read_io_pressure().map(|p| p.some.avg10);
                 let mem_psi = crate::system::psi::read_memory_pressure().map(|p| p.some.avg10);
 
+                let battery_pct = crate::hardware::get_battery_percent().unwrap_or(50);
+                let is_screen_on = matches!(get_screen_state(), ScreenState::On);
+
                 let ctx = crate::system::idle::IdleContext {
                     screen: get_screen_state(),
                     screen_off_duration: None,
                     charging: is_charging,
-                    battery_percent: 85,
+                    battery_percent: battery_pct,
                     cpu_psi_pct: cpu_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
                     io_psi_pct: io_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
                     mem_psi_pct: mem_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
-                    thermal_celsius: crate::system::idle::SensorReading::available(thermal.max_soc_temp_c),
+                    thermal_celsius: if thermal.max_soc_temp_c > 0.0 {
+                        crate::system::idle::SensorReading::available(thermal.max_soc_temp_c)
+                    } else {
+                        crate::system::idle::SensorReading::unavailable()
+                    },
                     thermal_source: Some("soc".to_string()),
-                    stationary: true,
-                    user_active: false,
+                    stationary: !is_screen_on,
+                    user_active: is_screen_on,
                 };
 
                 let assessment = crate::system::idle::IdlePolicy::evaluate(
@@ -372,19 +379,25 @@ impl DaemonContext {
                 let cpu_psi = crate::system::psi::read_cpu_pressure().map(|p| p.some.avg10);
                 let io_psi = crate::system::psi::read_io_pressure().map(|p| p.some.avg10);
                 let mem_psi = crate::system::psi::read_memory_pressure().map(|p| p.some.avg10);
+                let battery_pct = crate::hardware::get_battery_percent().unwrap_or(50);
+                let is_screen_on = matches!(screen, ScreenState::On);
 
                 let ctx = crate::system::idle::IdleContext {
                     screen,
                     screen_off_duration: None,
                     charging: is_charging,
-                    battery_percent: 85,
+                    battery_percent: battery_pct,
                     cpu_psi_pct: cpu_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
                     io_psi_pct: io_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
                     mem_psi_pct: mem_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
-                    thermal_celsius: crate::system::idle::SensorReading::available(thermal.max_soc_temp_c),
+                    thermal_celsius: if thermal.max_soc_temp_c > 0.0 {
+                        crate::system::idle::SensorReading::available(thermal.max_soc_temp_c)
+                    } else {
+                        crate::system::idle::SensorReading::unavailable()
+                    },
                     thermal_source: Some("soc".to_string()),
-                    stationary: true,
-                    user_active: false,
+                    stationary: !is_screen_on,
+                    user_active: is_screen_on,
                 };
 
                 let assessment = crate::system::idle::IdlePolicy::evaluate(

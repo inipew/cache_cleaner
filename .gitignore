@@ -2,5 +2,4 @@ target/
 dist/
 *.zip
 .system_generated/
-cleaner.toml
 cleaner.log*

@@ -199,18 +199,6 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
                             success: true,
                         });
                         summary.fully_migrated = true;
-
-                        // Apply low resource weights if controller files exist in target group
-                        if let Some(parent) = Path::new(path).parent() {
-                            let cpu_weight = parent.join("cpu.weight");
-                            if cpu_weight.exists() {
-                                let _ = fs::write(cpu_weight, "1\n");
-                            }
-                            let io_weight = parent.join("io.weight");
-                            if io_weight.exists() {
-                                let _ = fs::write(io_weight, "10\n");
-                            }
-                        }
                         break;
                     }
                 }

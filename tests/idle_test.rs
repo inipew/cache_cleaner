@@ -2,8 +2,8 @@
 mod tests {
     use cache_cleaner_daemon::hardware::ScreenState;
     use cache_cleaner_daemon::system::idle::{
-        IdleBlocker, IdleContext, IdleManager, IdlePolicy, IdlePositive, IdleState,
-        MaintenanceEligibility, SensorReading, ThermalHysteresisState,
+        IdleBlocker, IdleContext, IdleManager, IdlePolicy, IdleState, MaintenanceEligibility,
+        SensorReading, ThermalHysteresisState,
     };
     use cache_cleaner_daemon::util::{Clock, FakeClock};
     use std::sync::Arc;

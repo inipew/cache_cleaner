@@ -1,16 +1,64 @@
 use super::{CleanStage, PipelineContext};
 use crate::engine::storage::StorageOptimizer;
 use crate::ipc::protocol::CleanReport;
-use std::sync::atomic::{AtomicU64, Ordering};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static LAST_TRIM_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
 static BYTES_DELETED_SINCE_LAST_TRIM: AtomicU64 = AtomicU64::new(0);
+static STATE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct FstrimPersistedState {
+    last_trim_unix_secs: u64,
+    bytes_deleted_since_trim: u64,
+}
+
+fn get_fstrim_state_path() -> PathBuf {
+    let primary = Path::new("/data/adb/cleaner/fstrim_state.json");
+    if primary.parent().map_or(false, |p| p.exists()) {
+        primary.to_path_buf()
+    } else {
+        PathBuf::from("fstrim_state.json")
+    }
+}
+
+fn ensure_initialized() {
+    if !STATE_INITIALIZED.swap(true, Ordering::SeqCst) {
+        let path = get_fstrim_state_path();
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(state) = serde_json::from_str::<FstrimPersistedState>(&content) {
+                LAST_TRIM_UNIX_SECS.store(state.last_trim_unix_secs, Ordering::SeqCst);
+                BYTES_DELETED_SINCE_LAST_TRIM.store(state.bytes_deleted_since_trim, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+fn persist_state() {
+    let state = FstrimPersistedState {
+        last_trim_unix_secs: LAST_TRIM_UNIX_SECS.load(Ordering::SeqCst),
+        bytes_deleted_since_trim: BYTES_DELETED_SINCE_LAST_TRIM.load(Ordering::SeqCst),
+    };
+    let path = get_fstrim_state_path();
+    if let Ok(json_str) = serde_json::to_string_pretty(&state) {
+        let tmp = path.with_extension("tmp");
+        if fs::write(&tmp, json_str.as_bytes()).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+}
 
 pub fn record_freed_bytes_for_trim(freed_bytes: u64) {
+    ensure_initialized();
     BYTES_DELETED_SINCE_LAST_TRIM.fetch_add(freed_bytes, Ordering::SeqCst);
+    persist_state();
 }
 
 pub fn should_run_fstrim(manual_request: bool) -> bool {
+    ensure_initialized();
     if manual_request {
         return true; // Manual request bypasses cooldown
     }
@@ -31,12 +79,14 @@ pub fn should_run_fstrim(manual_request: bool) -> bool {
 }
 
 pub fn mark_fstrim_completed() {
+    ensure_initialized();
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     LAST_TRIM_UNIX_SECS.store(now_secs, Ordering::SeqCst);
     BYTES_DELETED_SINCE_LAST_TRIM.store(0, Ordering::SeqCst);
+    persist_state();
 }
 
 pub struct StorageOptStage;

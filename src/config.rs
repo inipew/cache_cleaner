@@ -403,12 +403,21 @@ impl DaemonConfig {
     }
 
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        use std::io::Write;
+
         self.validate()?;
         let content = toml::to_string_pretty(self)?;
-        if let Some(parent) = path.as_ref().parent() {
-            let _ = fs::create_dir_all(parent);
+        let target = path.as_ref();
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
         }
-        fs::write(path, content)?;
+        let tmp_path = target.with_extension("tmp");
+        {
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, target)?;
         Ok(())
     }
 }

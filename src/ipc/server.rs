@@ -55,16 +55,20 @@ impl IpcServer {
                 }
             }
 
-            // 2. Bind filesystem socket (/dev/socket/cleaner_daemon or /data/local/tmp/cleaner.sock)
+            // 2. Bind filesystem socket (/dev/socket/cleaner_daemon or /data/adb/cleaner/run/daemon)
             if !socket_path.is_empty() {
                 if let Some(parent) = Path::new(socket_path).parent() {
-                    let _ = fs::create_dir_all(parent);
+                    use std::os::unix::fs::DirBuilderExt;
+                    let _ = fs::DirBuilder::new().recursive(true).mode(0o700).create(parent);
                 }
                 let _ = fs::remove_file(socket_path);
 
                 match UnixListener::bind(socket_path) {
                     Ok(l) => {
                         let _ = l.set_nonblocking(true);
+                        if let Ok(c_path) = std::ffi::CString::new(socket_path) {
+                            unsafe { libc::chmod(c_path.as_ptr(), 0o600) };
+                        }
                         log::info!("IPC listening on filesystem socket: {}", socket_path);
                         listeners.push(l);
                     }
@@ -89,7 +93,9 @@ impl IpcServer {
         {
             let _ = socket_path;
             let _ = abstract_name;
-            Ok(Self {})
+            Ok(Self {
+                active_workers: Arc::new(AtomicUsize::new(0)),
+            })
         }
     }
 
@@ -238,16 +244,15 @@ pub fn is_command_authorized(caller_uid: u32, cmd: &Command) -> bool {
         Command::GetStatus
         | Command::GetStats
         | Command::GetIdleAssessment
-        | Command::Ping
-        | Command::Cancel => {
-            // Read-only queries and cancel allowed for system (1000) and shell (2000)
+        | Command::Ping => {
+            // Read-only queries allowed for system (1000) and shell (2000)
             caller_uid == 1000 || caller_uid == 2000
         }
         Command::TriggerClean(params) if !params.deep && !params.trim => {
             // Non-deep clean allowed for system (1000)
             caller_uid == 1000
         }
-        // Deep clean, trim, reload config, stop daemon strictly require root (0)
+        // Cancel, Deep clean, trim, reload config, stop daemon strictly require root (0)
         _ => false,
     }
 }

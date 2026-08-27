@@ -57,7 +57,8 @@ impl MemoryOptimizer {
             return false;
         }
 
-        let target_bytes = target_mb.saturating_mul(1024 * 1024);
+        let capped_mb = target_mb.min(2048); // Maximum 2 GB per single reclaim cycle
+        let target_bytes = capped_mb.saturating_mul(1024 * 1024);
         let payload = format!("{target_bytes}\n");
 
         let mut success = false;
@@ -65,19 +66,16 @@ impl MemoryOptimizer {
             match fs::write(path, &payload) {
                 Ok(_) => {
                     log::info!(
-                        "Cgroup v2 memory reclaim (target: {target_mb} MB) triggered successfully on {}",
+                        "Cgroup v2 memory reclaim (target: {capped_mb} MB) triggered successfully on {}",
                         path.display()
                     );
                     success = true;
                 }
                 Err(e) => {
-                    // Writing to memory.reclaim may return EAGAIN / EBUSY if memory cannot be reclaimed
                     log::debug!(
-                        "Cgroup memory reclaim on {} completed or yielded: {e}",
+                        "Cgroup memory reclaim write on {} failed: {e}",
                         path.display()
                     );
-                    // Even if partial, it triggered kernel reclaim
-                    success = true;
                 }
             }
         }

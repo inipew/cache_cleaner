@@ -87,6 +87,25 @@ pub struct PackagePolicy {
     pub allow_external_cache: bool,
 }
 
+/// Compares path components to guarantee that `path` is equal to `root` or a strict descendant child,
+/// preventing `/system_ext` from matching `/system` or `/data/user_backup` from matching `/data/user`.
+pub fn is_same_or_descendant<P: AsRef<Path>, R: AsRef<Path>>(path: P, root: R) -> bool {
+    let mut p_comps = path.as_ref().components();
+    let mut r_comps = root.as_ref().components();
+
+    loop {
+        match (r_comps.next(), p_comps.next()) {
+            (Some(r), Some(p)) => {
+                if r != p {
+                    return false;
+                }
+            }
+            (None, _) => return true,
+            (Some(_), None) => return false,
+        }
+    }
+}
+
 /// Validates Android package name format: ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$
 pub fn is_valid_package_name(name: &str) -> bool {
     let mut parts = name.split('.');
@@ -123,6 +142,12 @@ pub fn is_valid_package_name(name: &str) -> bool {
 pub struct RuleEngine {
     rules: CleaningRulesConfig,
     safety: SafetyConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemJunkTarget {
+    pub path: &'static str,
+    pub category: JunkCategory,
 }
 
 const OEM_LOG_ROOTS: &[&str] = &[
@@ -165,16 +190,21 @@ impl RuleEngine {
         let path_str = path.to_string_lossy();
 
         // 1. Absolute Deny: System / Immutable partition protection
-        if path.starts_with("/system")
-            || path.starts_with("/vendor")
-            || path.starts_with("/apex")
-            || path.starts_with("/product")
-            || path.starts_with("/system_ext")
-            || path.starts_with("/etc")
-            || path.starts_with("/proc")
-            || path.starts_with("/sys")
-            || path.starts_with("/dev")
-        {
+        let is_system_partition = [
+            "/system",
+            "/vendor",
+            "/apex",
+            "/product",
+            "/system_ext",
+            "/etc",
+            "/proc",
+            "/sys",
+            "/dev",
+        ]
+        .iter()
+        .any(|root| is_same_or_descendant(path, Path::new(root)));
+
+        if is_system_partition {
             return Decision::Skip {
                 reason: SkipReason::ProtectedDirectory("system_immutable_partition".to_string()),
             };
@@ -336,7 +366,9 @@ impl RuleEngine {
         // Categories below require Aggressive SafetyMode (OEM logs, crash dumps, temp APKs)
 
         // E. OEM Vendor Logs (Aggressive only)
-        let is_oem_log_root = OEM_LOG_ROOTS.iter().any(|root| path.starts_with(root));
+        let is_oem_log_root = OEM_LOG_ROOTS
+            .iter()
+            .any(|root| is_same_or_descendant(path, Path::new(root)));
         if is_oem_log_root {
             if self.safety.mode != SafetyMode::Aggressive {
                 return Decision::Skip {
@@ -344,23 +376,22 @@ impl RuleEngine {
                 };
             }
             if self.rules.clean_oem_logs {
-                // Safe OEM log pattern filtering
+                // Safe OEM log pattern filtering (STRICTLY files only, NEVER fallback on directories)
                 let is_log_file = path_str.ends_with(".log")
                     || path_str.ends_with(".txt")
                     || path_str.ends_with(".old")
                     || path_str.ends_with(".trace")
                     || path_str.ends_with(".dump")
                     || path_str.ends_with(".gz")
-                    || path_str.contains("/log/")
-                    || path_str.contains("/logs/")
+                    || path_str.contains("/hilog/")
                     || path_str.contains("/mobilelog/")
                     || path_str.contains("/netlog/")
                     || path_str.contains("/connsyslog/");
 
-                if is_log_file || !path.is_file() {
+                if is_log_file {
                     return Decision::Delete {
                         category: JunkCategory::OemLog,
-                        reason: "OEM vendor diagnostic/debug log",
+                        reason: "OEM vendor diagnostic/debug log file",
                     };
                 }
             } else {
@@ -371,7 +402,9 @@ impl RuleEngine {
         }
 
         // F. Crash Dumps, ANR, and DropBox (Aggressive only)
-        let is_crash_dump_root = CRASH_DUMP_ROOTS.iter().any(|root| path.starts_with(root));
+        let is_crash_dump_root = CRASH_DUMP_ROOTS
+            .iter()
+            .any(|root| is_same_or_descendant(path, Path::new(root)));
         if is_crash_dump_root {
             if self.safety.mode != SafetyMode::Aggressive {
                 return Decision::Skip {
@@ -391,7 +424,9 @@ impl RuleEngine {
         }
 
         // G. Temporary APKs and Split Dex files (Aggressive only)
-        let is_temp_apk_root = STAGED_APK_ROOTS.iter().any(|root| path.starts_with(root));
+        let is_temp_apk_root = STAGED_APK_ROOTS
+            .iter()
+            .any(|root| is_same_or_descendant(path, Path::new(root)));
         if is_temp_apk_root {
             if self.safety.mode != SafetyMode::Aggressive {
                 return Decision::Skip {
@@ -404,7 +439,7 @@ impl RuleEngine {
                     || path_str.ends_with(".tmp")
                     || path_str.ends_with(".apk.tmp");
 
-                if is_apk_artifact || !path.is_file() {
+                if is_apk_artifact {
                     return Decision::Delete {
                         category: JunkCategory::TempApk,
                         reason: "Temporary APK installation session artifact",
@@ -415,7 +450,7 @@ impl RuleEngine {
                     reason: SkipReason::DisabledByConfig("clean_temp_apks"),
                 };
             }
-        } else if path.starts_with("/data/local/tmp") {
+        } else if is_same_or_descendant(path, Path::new("/data/local/tmp")) {
             if self.safety.mode != SafetyMode::Aggressive {
                 return Decision::Skip {
                     reason: SkipReason::DisabledByConfig("temp_apks_require_aggressive_mode"),
@@ -450,17 +485,35 @@ impl RuleEngine {
         self.evaluate_path(path).into()
     }
 
-    pub fn get_system_junk_targets(&self) -> Vec<&'static str> {
+    pub fn get_system_junk_targets(&self) -> Vec<SystemJunkTarget> {
         let mut targets = Vec::new();
         if self.rules.clean_oem_logs {
-            targets.extend_from_slice(OEM_LOG_ROOTS);
+            for root in OEM_LOG_ROOTS {
+                targets.push(SystemJunkTarget {
+                    path: root,
+                    category: JunkCategory::OemLog,
+                });
+            }
         }
         if self.rules.clean_crash_dumps {
-            targets.extend_from_slice(CRASH_DUMP_ROOTS);
+            for root in CRASH_DUMP_ROOTS {
+                targets.push(SystemJunkTarget {
+                    path: root,
+                    category: JunkCategory::CrashDump,
+                });
+            }
         }
         if self.rules.clean_temp_apks {
-            targets.extend_from_slice(STAGED_APK_ROOTS);
-            targets.push("/data/local/tmp");
+            for root in STAGED_APK_ROOTS {
+                targets.push(SystemJunkTarget {
+                    path: root,
+                    category: JunkCategory::TempApk,
+                });
+            }
+            targets.push(SystemJunkTarget {
+                path: "/data/local/tmp",
+                category: JunkCategory::TempApk,
+            });
         }
         targets
     }

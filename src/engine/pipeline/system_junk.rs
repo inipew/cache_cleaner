@@ -1,4 +1,5 @@
 use super::{CleanStage, PipelineContext};
+use crate::engine::rules::JunkCategory;
 use crate::ipc::protocol::CleanReport;
 use std::path::Path;
 
@@ -17,12 +18,9 @@ impl CleanStage for SystemJunkStage {
                 break;
             }
 
-            let path = Path::new(target);
+            let path = Path::new(target.path);
             if path.exists() {
-                let stats = if target.contains("tombstones")
-                    || target.contains("anr")
-                    || target.contains("dropbox")
-                {
+                let stats = if target.category == JunkCategory::CrashDump {
                     ctx.walker.clean_crash_dumps_directory(
                         path,
                         ctx.config.cleaning.keep_recent_crash_files,
@@ -31,7 +29,7 @@ impl CleanStage for SystemJunkStage {
                     ctx.walker.clean_directory(path)
                 };
 
-                report.record_system_junk_stats(&stats, target);
+                report.record_system_junk_stats(&stats, target.category);
             }
         }
     }

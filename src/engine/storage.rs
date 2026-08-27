@@ -18,17 +18,14 @@ struct FstrimRange {
 pub struct StorageOptimizer;
 
 impl StorageOptimizer {
-    /// Executes FITRIM on specified mount points (e.g. /data, /cache) and discovered mounts
+    /// Executes FITRIM strictly on configured allowlist mount points (or discovered candidate mounts if none specified)
     pub fn trim_mounts(configured_mounts: &[String]) -> bool {
         let mut overall_success = false;
-        let mut target_mounts = configured_mounts.to_vec();
-
-        // Dynamically discover candidate partitions from /proc/mounts
-        for discovered in Self::discover_trimmable_mounts() {
-            if !target_mounts.contains(&discovered) {
-                target_mounts.push(discovered);
-            }
-        }
+        let target_mounts = if !configured_mounts.is_empty() {
+            configured_mounts.to_vec()
+        } else {
+            Self::discover_trimmable_mounts()
+        };
 
         for mount in &target_mounts {
             if !Path::new(mount).exists() {

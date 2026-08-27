@@ -42,9 +42,9 @@ pub fn check_encryption_state(user_id: u32) -> EncryptionState {
                         EncryptionState::DeviceEncryptedOnly
                     }
                 } else {
-                    // Empty directory: check DE presence to confirm valid unlocked structure
+                    // Empty directory: cannot verify CE key presence. Fail closed to DE only.
                     if de_path.exists() {
-                        EncryptionState::FullyUnlocked
+                        EncryptionState::DeviceEncryptedOnly
                     } else {
                         EncryptionState::Unknown
                     }

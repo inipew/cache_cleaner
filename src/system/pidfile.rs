@@ -41,11 +41,19 @@ impl PidLock {
         #[cfg(unix)]
         {
             let mut last_err = None;
+            let is_root = unsafe { libc::getuid() == 0 };
 
             // Ensure mandatory run directory exists
             let _ = fs::create_dir_all(RUN_DIR);
 
-            for candidate in CANDIDATE_PATHS {
+            // In root mode on Android, strictly enforce the primary path to prevent /tmp attacks
+            let candidates: &[PathPair] = if is_root {
+                &CANDIDATE_PATHS[0..1]
+            } else {
+                CANDIDATE_PATHS
+            };
+
+            for candidate in candidates {
                 if let Some(parent) = Path::new(candidate.lock_path).parent() {
                     if !parent.as_os_str().is_empty() && !parent.exists() {
                         let _ = fs::create_dir_all(parent);
@@ -90,7 +98,8 @@ impl PidLock {
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o644)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
             .open(&lock_path)?;
 
         let fd = lock_file.as_raw_fd();
@@ -120,7 +129,8 @@ impl PidLock {
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o644)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
             .open(&pid_path)?;
 
         writeln!(pid_file, "{current_pid}")?;

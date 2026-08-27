@@ -139,29 +139,23 @@ impl CleanReport {
         self.sync_compat_fields();
     }
 
-    /// Accumulates walk stats categorized by system junk target path
+    /// Accumulates walk stats categorized by system junk category
     pub fn record_system_junk_stats(
         &mut self,
         stats: &crate::engine::walker::WalkStats,
-        target: &str,
+        category: crate::engine::rules::JunkCategory,
     ) {
-        if target.contains("log")
-            || target.contains("miui")
-            || target.contains("oppo")
-            || target.contains("vivo")
-            || target.contains("hilog")
-        {
-            self.storage.oem_logs_bytes += stats.bytes_freed;
-        } else if target.contains("tombstones")
-            || target.contains("anr")
-            || target.contains("dropbox")
-        {
-            self.storage.crash_dumps_bytes += stats.bytes_freed;
-        } else if target.contains("app-staging")
-            || target.contains("tmp")
-            || target.contains("package_cache")
-        {
-            self.storage.temp_apks_bytes += stats.bytes_freed;
+        match category {
+            crate::engine::rules::JunkCategory::OemLog => {
+                self.storage.oem_logs_bytes += stats.bytes_freed;
+            }
+            crate::engine::rules::JunkCategory::CrashDump => {
+                self.storage.crash_dumps_bytes += stats.bytes_freed;
+            }
+            crate::engine::rules::JunkCategory::TempApk => {
+                self.storage.temp_apks_bytes += stats.bytes_freed;
+            }
+            _ => {}
         }
 
         self.storage.total_freed_bytes += stats.bytes_freed;

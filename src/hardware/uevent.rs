@@ -190,6 +190,42 @@ fn get_charger_state_fallback() -> ChargerState {
     ChargerState::Unknown
 }
 
+/// Dynamically reads battery capacity percentage (0..=100) from Linux/Android sysfs
+pub fn get_battery_percent() -> Option<u8> {
+    let mut buf = [0u8; 16];
+    let capacity_paths = [
+        "/sys/class/power_supply/battery/capacity",
+        "/sys/class/power_supply/bms/capacity",
+        "/sys/class/power_supply/qcom-battery/capacity",
+    ];
+
+    for path in &capacity_paths {
+        if let Some(content) = read_file_to_buf(Path::new(path), &mut buf) {
+            if let Ok(pct) = content.trim().parse::<u8>() {
+                if pct <= 100 {
+                    return Some(pct);
+                }
+            }
+        }
+    }
+
+    // Scan dynamic /sys/class/power_supply/*/capacity
+    if let Ok(entries) = fs::read_dir("/sys/class/power_supply") {
+        for entry in entries.flatten() {
+            let cap_path = entry.path().join("capacity");
+            if let Some(content) = read_file_to_buf(&cap_path, &mut buf) {
+                if let Ok(pct) = content.trim().parse::<u8>() {
+                    if pct <= 100 {
+                        return Some(pct);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Dynamically discovers screen backlight, framebuffers, DRM nodes, and display status
 pub fn get_screen_state() -> ScreenState {
     let mut buf = [0u8; 32];

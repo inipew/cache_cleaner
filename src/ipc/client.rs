@@ -46,9 +46,14 @@ impl IpcClient {
         }
 
         // 2. Try mandatory filesystem socket: /data/adb/cleaner/run/daemon
-        let socket_paths = [SOCKET_PATH, "/tmp/cleaner.sock"];
+        let is_root = unsafe { libc::getuid() == 0 };
+        let socket_paths: &[&str] = if is_root {
+            &[SOCKET_PATH]
+        } else {
+            &[SOCKET_PATH, "/tmp/cleaner.sock"]
+        };
 
-        for path in &socket_paths {
+        for path in socket_paths {
             if Path::new(path).exists() {
                 if let Ok(stream) = UnixStream::connect(path) {
                     return Ok(stream);

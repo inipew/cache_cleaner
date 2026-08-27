@@ -185,10 +185,10 @@ mod tests {
             })
         ));
 
-        // System (1000) is authorized for status, ping, cancel, and normal clean
+        // System (1000) is authorized for status, ping, and normal clean (NOT Cancel)
         assert!(is_command_authorized(1000, &Command::GetStatus));
         assert!(is_command_authorized(1000, &Command::Ping));
-        assert!(is_command_authorized(1000, &Command::Cancel));
+        assert!(!is_command_authorized(1000, &Command::Cancel));
         assert!(is_command_authorized(
             1000,
             &Command::TriggerClean(CleanParams {
@@ -199,7 +199,7 @@ mod tests {
             })
         ));
 
-        // System (1000) is NOT authorized for deep clean or daemon termination
+        // System (1000) is NOT authorized for deep clean, cancel, or daemon termination
         assert!(!is_command_authorized(
             1000,
             &Command::TriggerClean(CleanParams {
@@ -211,11 +211,11 @@ mod tests {
         ));
         assert!(!is_command_authorized(1000, &Command::StopDaemon));
 
-        // Shell (2000) is ONLY authorized for read-only queries & cancel
+        // Shell (2000) is ONLY authorized for read-only queries (NOT Cancel)
         assert!(is_command_authorized(2000, &Command::GetStatus));
         assert!(is_command_authorized(2000, &Command::GetStats));
         assert!(is_command_authorized(2000, &Command::Ping));
-        assert!(is_command_authorized(2000, &Command::Cancel));
+        assert!(!is_command_authorized(2000, &Command::Cancel));
         assert!(!is_command_authorized(
             2000,
             &Command::TriggerClean(CleanParams {
@@ -231,5 +231,46 @@ mod tests {
         // Untrusted app UID (10123) is denied for all commands
         assert!(!is_command_authorized(10123, &Command::GetStatus));
         assert!(!is_command_authorized(10123, &Command::StopDaemon));
+    }
+
+    #[test]
+    fn test_is_same_or_descendant_boundary_safety() {
+        use cache_cleaner_daemon::engine::rules::is_same_or_descendant;
+
+        // Identical match
+        assert!(is_same_or_descendant(Path::new("/system"), Path::new("/system")));
+        assert!(is_same_or_descendant(Path::new("/data/miui"), Path::new("/data/miui")));
+
+        // True descendants
+        assert!(is_same_or_descendant(Path::new("/system/bin/sh"), Path::new("/system")));
+        assert!(is_same_or_descendant(Path::new("/data/miui/gallery/log.txt"), Path::new("/data/miui")));
+
+        // Sibling / prefix collisions MUST NOT match
+        assert!(!is_same_or_descendant(Path::new("/system_ext"), Path::new("/system")));
+        assert!(!is_same_or_descendant(Path::new("/system_ext/app"), Path::new("/system")));
+        assert!(!is_same_or_descendant(Path::new("/system_backup"), Path::new("/system")));
+        assert!(!is_same_or_descendant(Path::new("/data/user_backup"), Path::new("/data/user")));
+        assert!(!is_same_or_descendant(Path::new("/data/miui_backup/log.txt"), Path::new("/data/miui")));
+    }
+
+    #[test]
+    fn test_oem_directories_are_never_marked_for_deletion() {
+        let rules = CleaningRulesConfig {
+            clean_oem_logs: true,
+            ..Default::default()
+        };
+        let safety = SafetyConfig {
+            mode: SafetyMode::Aggressive,
+            ..Default::default()
+        };
+        let engine = RuleEngine::new(rules, safety);
+
+        // Files with recognized log extensions are marked for delete
+        let decision_file = engine.evaluate_path(Path::new("/data/miui/debug.log"));
+        assert!(matches!(decision_file, Decision::Delete { category: JunkCategory::OemLog, .. }));
+
+        // Bare directories without log extension must NOT be classified as Delete
+        let decision_dir = engine.evaluate_path(Path::new("/data/miui/gallery/subfolder"));
+        assert!(!decision_dir.is_delete());
     }
 }

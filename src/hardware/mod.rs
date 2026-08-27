@@ -10,4 +10,7 @@ pub use thermal::read_thermal;
 #[allow(unused_imports)]
 pub use uevent::UeventSocket;
 #[allow(unused_imports)]
-pub use uevent::{get_charger_state, get_screen_state, ChargerState, ScreenState, UeventMessage};
+pub use uevent::{
+    get_battery_percent, get_charger_state, get_screen_state, ChargerState, ScreenState,
+    UeventMessage,
+};
