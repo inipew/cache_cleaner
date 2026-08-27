@@ -14,7 +14,9 @@ pub use cgroup::{
     CgroupDiagnostics, CgroupMigrationSummary, CgroupVersion,
 };
 pub use daemon_state::{DaemonContext, DaemonRuntimeState, DaemonState};
-pub use event_loop::{run_epoll_loop, run_fallback_loop};
+pub use event_loop::{run_epoll_loop, run_fallback_loop, LoopAction, LoopEvent, LoopState};
+#[cfg(unix)]
+pub use event_loop::instant_to_itimerspec;
 pub use freezer::{
     enumerate_frozen_uids, get_freezer_diagnostics, get_pid_freezer_state, get_uid_freezer_state,
     is_cached_apps_freezer_enabled, is_freezer_supported, FreezerDiagnostics, FreezerState,
