@@ -235,7 +235,11 @@ pub fn is_command_authorized(caller_uid: u32, cmd: &Command) -> bool {
     }
 
     match cmd {
-        Command::GetStatus | Command::GetStats | Command::Ping | Command::Cancel => {
+        Command::GetStatus
+        | Command::GetStats
+        | Command::GetIdleAssessment
+        | Command::Ping
+        | Command::Cancel => {
             // Read-only queries and cancel allowed for system (1000) and shell (2000)
             caller_uid == 1000 || caller_uid == 2000
         }

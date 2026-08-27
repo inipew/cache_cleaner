@@ -85,6 +85,17 @@ pub enum Commands {
         path: PathBuf,
     },
 
+    /// Query and explain adaptive idle assessment, score, and maintenance eligibility
+    Idle {
+        /// Print detailed scoring breakdown, positives, and blocker factors
+        #[arg(long, short)]
+        explain: bool,
+
+        /// Output assessment in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show detected Android platform, FBE encryption, users, and hardware info
     Info,
 

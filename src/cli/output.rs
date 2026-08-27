@@ -64,5 +64,8 @@ pub fn print_clean_report(report: &CleanReport) {
         println!("    Mounts Trimmed : {}", report.trim.trimmed_mounts.join(", "));
     }
     println!("    F2FS GC Urgent : {}", report.optimization.f2fs_gc_activated);
+    if let Some(ref reason) = report.cancel_reason {
+        println!("    Cancelled By   : {}", reason);
+    }
     println!("    Job Duration   : {} ms", report.duration_ms);
 }

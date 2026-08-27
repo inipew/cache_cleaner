@@ -574,7 +574,7 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
 
                     LoopAction::PreemptCleaning(reason) => {
                         log::info!("Preempting cleaning operation: {reason}");
-                        ctx.cancel_token.cancel();
+                        ctx.cancel_token.cancel_with_reason(crate::engine::cancellation::CancelReason::ScreenOn);
                         ctx.set_state(DaemonState::Preempted(reason));
                     }
 
@@ -590,7 +590,7 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
                         for sa in sub_actions {
                             if let LoopAction::PreemptCleaning(r) = sa {
                                 log::info!("Preempting cleaning operation (reconciled): {r}");
-                                ctx.cancel_token.cancel();
+                                ctx.cancel_token.cancel_with_reason(crate::engine::cancellation::CancelReason::ScreenOn);
                                 ctx.set_state(DaemonState::Preempted(r));
                             }
                         }

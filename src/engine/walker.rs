@@ -58,12 +58,15 @@ fn safe_unlink_entry<Fd: rustix::fd::AsFd>(
     }
 }
 
+use crate::util::TokenBucketRateLimiter;
+
 pub struct DirectoryWalker<'a> {
     rule_engine: &'a RuleEngine,
     cancel_token: &'a CancellationToken,
     min_age: Duration,
     dry_run: bool,
     frozen_uids: Option<&'a std::collections::HashSet<u32>>,
+    rate_limiter: Option<&'a TokenBucketRateLimiter>,
 }
 
 impl<'a> DirectoryWalker<'a> {
@@ -79,15 +82,23 @@ impl<'a> DirectoryWalker<'a> {
             min_age: Duration::from_secs(u64::from(min_age_hours) * 3600),
             dry_run,
             frozen_uids: None,
+            rate_limiter: None,
         }
     }
-
 
     pub fn with_frozen_uids(
         mut self,
         frozen_uids: Option<&'a std::collections::HashSet<u32>>,
     ) -> Self {
         self.frozen_uids = frozen_uids;
+        self
+    }
+
+    pub fn with_rate_limiter(
+        mut self,
+        rate_limiter: Option<&'a TokenBucketRateLimiter>,
+    ) -> Self {
+        self.rate_limiter = rate_limiter;
         self
     }
 
@@ -204,6 +215,12 @@ impl<'a> DirectoryWalker<'a> {
                     break;
                 }
 
+                if let Some(limiter) = self.rate_limiter {
+                    if !limiter.acquire() && self.cancel_token.is_cancelled() {
+                        break;
+                    }
+                }
+
                 if !self.dry_run {
                     if safe_unlink_entry(&dir_fd, &name, dev, ino, FileType::RegularFile, AtFlags::empty()) {
                         stats.files_deleted += 1;
@@ -294,6 +311,12 @@ impl<'a> DirectoryWalker<'a> {
             while let Some(entry_result) = raw_dir.next() {
                 if self.cancel_token.is_cancelled() {
                     break;
+                }
+
+                if let Some(limiter) = self.rate_limiter {
+                    if !limiter.acquire() && self.cancel_token.is_cancelled() {
+                        break;
+                    }
                 }
 
                 let entry = match entry_result {
@@ -522,6 +545,12 @@ impl<'a> DirectoryWalker<'a> {
             while let Some(entry_result) = raw_dir.next() {
                 if self.cancel_token.is_cancelled() {
                     break;
+                }
+
+                if let Some(limiter) = self.rate_limiter {
+                    if !limiter.acquire() && self.cancel_token.is_cancelled() {
+                        break;
+                    }
                 }
 
                 let entry = match entry_result {

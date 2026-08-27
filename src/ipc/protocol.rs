@@ -22,6 +22,7 @@ pub enum Command {
     TriggerClean(CleanParams),
     GetStatus,
     GetStats,
+    GetIdleAssessment,
     Cancel,
     ReloadConfig,
     StopDaemon,
@@ -46,6 +47,12 @@ pub struct DaemonStatus {
     pub ram_rss_bytes: u64,
     #[serde(default)]
     pub ram_pss_bytes: u64,
+    #[serde(default)]
+    pub idle_state: String,
+    #[serde(default)]
+    pub idle_score: u8,
+    #[serde(default)]
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -98,6 +105,8 @@ pub struct CleanReport {
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_entries: Option<Vec<PlanEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<crate::engine::cancellation::CancelReason>,
 
     // Flat compatibility fields
     pub total_freed_bytes: u64,
@@ -202,6 +211,7 @@ pub enum ResponseData {
     Pong { version: String, uptime_secs: u64 },
     Status(DaemonStatus),
     Report(CleanReport),
+    Idle(crate::system::idle::IdleAssessment),
     Message(String),
 }
 

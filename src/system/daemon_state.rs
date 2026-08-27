@@ -319,6 +319,31 @@ impl DaemonContext {
                 let metrics = crate::system::proc_metrics::get_process_metrics();
                 let rt = self.runtime.read().unwrap_or_else(std::sync::PoisonError::into_inner);
 
+                let cpu_psi = crate::system::psi::read_cpu_pressure().map(|p| p.some.avg10);
+                let io_psi = crate::system::psi::read_io_pressure().map(|p| p.some.avg10);
+                let mem_psi = crate::system::psi::read_memory_pressure().map(|p| p.some.avg10);
+
+                let ctx = crate::system::idle::IdleContext {
+                    screen: get_screen_state(),
+                    screen_off_duration: None,
+                    charging: is_charging,
+                    battery_percent: 85,
+                    cpu_psi_pct: cpu_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
+                    io_psi_pct: io_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
+                    mem_psi_pct: mem_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
+                    thermal_celsius: crate::system::idle::SensorReading::available(thermal.max_soc_temp_c),
+                    thermal_source: Some("soc".to_string()),
+                    stationary: true,
+                    user_active: false,
+                };
+
+                let assessment = crate::system::idle::IdlePolicy::evaluate(
+                    &ctx,
+                    crate::system::idle::IdleState::Active,
+                    crate::system::idle::ThermalHysteresisState::Normal,
+                    Duration::from_secs(300),
+                );
+
                 let status = DaemonStatus {
                     state: rt.state.to_string(),
                     uptime_secs: self.start_time.elapsed().as_secs(),
@@ -333,8 +358,43 @@ impl DaemonContext {
                     ram_vm_size_bytes: metrics.vm_size_bytes,
                     ram_rss_bytes: metrics.rss_bytes,
                     ram_pss_bytes: metrics.pss_bytes,
+                    idle_state: assessment.state.to_string(),
+                    idle_score: assessment.score,
+                    blockers: assessment.blockers.iter().map(|b| b.description().to_string()).collect(),
                 };
                 Response::Success(ResponseData::Status(status))
+            }
+            Command::GetIdleAssessment => {
+                let screen = get_screen_state();
+                let charger = get_charger_state();
+                let is_charging = matches!(charger, ChargerState::Charging | ChargerState::Full);
+                let thermal = read_thermal();
+                let cpu_psi = crate::system::psi::read_cpu_pressure().map(|p| p.some.avg10);
+                let io_psi = crate::system::psi::read_io_pressure().map(|p| p.some.avg10);
+                let mem_psi = crate::system::psi::read_memory_pressure().map(|p| p.some.avg10);
+
+                let ctx = crate::system::idle::IdleContext {
+                    screen,
+                    screen_off_duration: None,
+                    charging: is_charging,
+                    battery_percent: 85,
+                    cpu_psi_pct: cpu_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
+                    io_psi_pct: io_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
+                    mem_psi_pct: mem_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
+                    thermal_celsius: crate::system::idle::SensorReading::available(thermal.max_soc_temp_c),
+                    thermal_source: Some("soc".to_string()),
+                    stationary: true,
+                    user_active: false,
+                };
+
+                let assessment = crate::system::idle::IdlePolicy::evaluate(
+                    &ctx,
+                    crate::system::idle::IdleState::Active,
+                    crate::system::idle::ThermalHysteresisState::Normal,
+                    Duration::from_secs(300),
+                );
+
+                Response::Success(ResponseData::Idle(assessment))
             }
             Command::TriggerClean(params) => {
                 {
@@ -404,6 +464,9 @@ impl DaemonContext {
                     ram_vm_size_bytes: metrics.vm_size_bytes,
                     ram_rss_bytes: metrics.rss_bytes,
                     ram_pss_bytes: metrics.pss_bytes,
+                    idle_state: "N/A".to_string(),
+                    idle_score: 0,
+                    blockers: Vec::new(),
                 };
                 Response::Success(ResponseData::Status(status))
             }

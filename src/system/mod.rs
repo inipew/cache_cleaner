@@ -3,11 +3,17 @@ pub mod daemon_state;
 pub mod event_loop;
 pub mod freezer;
 pub mod governor;
+pub mod idle;
 pub mod pidfile;
 pub mod proc_metrics;
 pub mod psi;
 pub mod signals;
 pub mod watcher;
+
+pub use idle::{
+    IdleAssessment, IdleBlocker, IdleContext, IdleManager, IdlePolicy, IdlePositive, IdleState,
+    MaintenanceEligibility, SensorReading, SensorStatus, ThermalHysteresisState,
+};
 
 pub use cgroup::{
     get_cgroup_diagnostics, is_memory_reclaim_supported, migrate_to_background_cgroup,

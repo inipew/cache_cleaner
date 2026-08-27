@@ -262,3 +262,52 @@ pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
     }
     println!("==================================================");
 }
+
+pub fn show_idle_assessment(explain: bool, json: bool) {
+    let response = IpcClient::connect_and_send(&Command::GetIdleAssessment);
+    match response {
+        Ok(Response::Success(ResponseData::Idle(assessment))) => {
+            if json {
+                if let Ok(json_str) = serde_json::to_string_pretty(&assessment) {
+                    println!("{}", json_str);
+                }
+            } else {
+                println!("==================================================");
+                println!("            ADAPTIVE IDLE ASSESSMENT              ");
+                println!("==================================================");
+                println!("  Idle State    : {}", assessment.state);
+                println!("  Idle Score    : {} / 100", assessment.score);
+                println!("  Thermal State : {:?}", assessment.thermal_state);
+                println!("  Standard Clean: {}", assessment.standard_maintenance);
+                println!("  Heavy Clean   : {}", assessment.heavy_maintenance);
+                println!("  Work Rate     : {} ops/sec", assessment.rate_limit_ops_per_sec);
+                if let Some(next) = assessment.time_until_next_transition {
+                    println!("  Next Transition: in {}s", next.as_secs());
+                }
+
+                if explain {
+                    println!("--------------------------------------------------");
+                    println!("  Positive Factors:");
+                    for pos in &assessment.positives {
+                        println!("    • {}", pos.description());
+                    }
+                    if !assessment.blockers.is_empty() {
+                        println!("  Active Blockers:");
+                        for b in &assessment.blockers {
+                            println!("    ✗ {}", b.description());
+                        }
+                    }
+                }
+                println!("==================================================");
+            }
+        }
+        Ok(Response::Error(err)) => {
+            eprintln!("Daemon returned error: {}", err);
+        }
+        Err(e) => {
+            eprintln!("Daemon is unreachable via IPC ({})", e);
+        }
+        _ => {}
+    }
+}
+

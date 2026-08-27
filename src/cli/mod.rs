@@ -59,6 +59,10 @@ pub fn dispatch_command(cli: Cli) {
             diagnostics::explain_path(&config, &path);
         }
 
+        Commands::Idle { explain, json } => {
+            diagnostics::show_idle_assessment(explain, json);
+        }
+
         Commands::Info => {
             diagnostics::show_platform_info();
         }

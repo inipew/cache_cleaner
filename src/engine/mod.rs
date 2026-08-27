@@ -84,6 +84,7 @@ impl CleanEngine {
         self.pipeline.execute(&ctx, &mut report);
 
         let duration_ms = u64::try_from(start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
+        report.cancel_reason = cancel_token.get_cancel_reason();
         report.finalize_totals(duration_ms);
 
         log::info!(
