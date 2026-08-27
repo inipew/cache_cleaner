@@ -75,6 +75,12 @@ pub enum Commands {
     /// Reload daemon configuration without restarting (via IPC or SIGHUP)
     Reload,
 
+    /// Explain rule engine classification and safety decision for a specific path
+    Explain {
+        /// Target path to inspect
+        path: PathBuf,
+    },
+
     /// Show detected Android platform, FBE encryption, users, and hardware info
     Info,
 

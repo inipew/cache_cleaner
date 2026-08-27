@@ -15,11 +15,16 @@ mod tests {
         assert!(config.cleaning.clean_app_cache);
         assert!(config.cleaning.clean_webview_cache);
         assert!(config.cleaning.clean_image_caches);
+        assert!(!config.cleaning.clean_thumbnails); // Conservative default
+        assert!(!config.cleaning.clean_oem_logs);   // Conservative default
+        assert!(!config.cleaning.clean_crash_dumps); // Conservative default
+        assert!(!config.cleaning.clean_temp_apks);   // Conservative default
+        assert_eq!(config.cleaning.min_file_age_hours, 24); // 24h default
         assert!(!config.cleaning.clean_code_cache); // Safe default: code_cache disabled
 
-        assert!(config.optimization.zram_compaction);
-        assert!(config.optimization.compact_memory);
-        assert!(config.optimization.cgroup_memory_reclaim);
+        assert!(!config.optimization.zram_compaction);
+        assert!(!config.optimization.compact_memory);
+        assert!(!config.optimization.cgroup_memory_reclaim);
         assert_eq!(config.optimization.cgroup_reclaim_amount_mb, 128);
         assert!(config.optimization.freezer_aware_cleaning);
         assert!(config.optimization.psi_adaptive_monitoring);
@@ -27,7 +32,7 @@ mod tests {
         assert_eq!(config.optimization.psi_critical_stall_ms, 250);
         assert_eq!(config.optimization.psi_cooldown_secs, 45);
         assert!(config.optimization.f2fs_gc_urgent);
-        assert!(config.optimization.fstrim_partitions);
+        assert!(!config.optimization.fstrim_partitions);
     }
 
     #[test]
@@ -63,8 +68,8 @@ mod tests {
         assert!(config.validate().is_err());
         config.max_soc_temp_c = 45.0;
 
-        // Test empty protected substrings
-        config.safety.protected_substrings.clear();
+        // Test empty protected directory names
+        config.safety.protected_directory_names.clear();
         assert!(config.validate().is_err());
     }
 

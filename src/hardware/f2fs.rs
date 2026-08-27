@@ -47,22 +47,45 @@ impl F2fsController {
         }
     }
 
-    /// Acquires a RAII guard that sets gc_urgent to the requested mode and reverts to 0 on drop
+    /// Acquires a RAII guard that sets gc_urgent to the requested mode and restores previous states on drop
     pub fn enter_gc_urgent_scoped(&self, mode: u8) -> Option<F2fsUrgentGuard<'_>> {
         if !self.is_available() {
             return None;
         }
+
+        let mut previous_modes = Vec::new();
+        for dev in &self.devices {
+            let gc_file = dev.join("gc_urgent");
+            let prev = fs::read_to_string(&gc_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                .unwrap_or(0);
+            previous_modes.push((gc_file, prev));
+        }
+
         self.set_gc_urgent(mode);
-        Some(F2fsUrgentGuard { controller: self })
+        Some(F2fsUrgentGuard {
+            _controller: self,
+            previous_modes,
+        })
     }
 }
 
 pub struct F2fsUrgentGuard<'a> {
-    controller: &'a F2fsController,
+    _controller: &'a F2fsController,
+    previous_modes: Vec<(PathBuf, u8)>,
 }
 
 impl<'a> Drop for F2fsUrgentGuard<'a> {
     fn drop(&mut self) {
-        self.controller.set_gc_urgent(0);
+        for (gc_file, prev_mode) in &self.previous_modes {
+            let mode_str = format!("{}\n", prev_mode);
+            let _ = fs::write(gc_file, mode_str);
+            log::debug!(
+                "Restored F2FS gc_urgent={} on {}",
+                prev_mode,
+                gc_file.display()
+            );
+        }
     }
 }

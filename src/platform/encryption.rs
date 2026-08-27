@@ -17,7 +17,6 @@ pub fn check_encryption_state(user_id: u32) -> EncryptionState {
     };
     let de_user_dir = format!("/data/user_de/{user_id}");
 
-
     let ce_path = Path::new(&ce_user_dir);
     let de_path = Path::new(&de_user_dir);
 
@@ -46,5 +45,27 @@ pub fn check_encryption_state(user_id: u32) -> EncryptionState {
         }
     } else {
         EncryptionState::FullyUnlocked
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageState {
+    pub ce_available: bool,
+    pub de_available: bool,
+    pub user_unlocked: bool,
+}
+
+impl StorageState {
+    #[must_use]
+    pub fn for_user(user_id: u32) -> Self {
+        let enc_state = check_encryption_state(user_id);
+        let ce_available = enc_state == EncryptionState::FullyUnlocked || enc_state == EncryptionState::Unencrypted;
+        let de_available = true;
+        let user_unlocked = ce_available;
+        Self {
+            ce_available,
+            de_available,
+            user_unlocked,
+        }
     }
 }

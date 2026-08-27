@@ -38,38 +38,38 @@ clean_webview_cache = true
 clean_image_caches = true
 
 # Clean media thumbnail directories (.thumbnails, .thumbcache)
-clean_thumbnails = true
+clean_thumbnails = false
 
 # Clean JIT dex code_cache (Disabled by default to avoid recompilation stutter)
 clean_code_cache = false
 
-# Clean OEM and vendor residue logs (MIUI/HyperOS mqsas, Samsung logs, BBK/Oppo logs, MTK/QCOM ramdumps)
-clean_oem_logs = true
+# Clean OEM and vendor residue logs
+clean_oem_logs = false
 
 # Clean crash dumps, tombstones, ANR traces, and system dropbox dumps
-clean_crash_dumps = true
+clean_crash_dumps = false
 
 # Number of recent crash dumps to retain for debugging (Default: 3)
 keep_recent_crash_files = 3
 
 # Clean temporary APKs, staged splits, and /data/local/tmp leftovers
-clean_temp_apks = true
+clean_temp_apks = false
 
-# Minimum file age in hours before considering it for deletion (0 = delete all matching junk)
-min_file_age_hours = 0
+# Minimum file age in hours before considering it for deletion (Default: 24h)
+min_file_age_hours = 24
 
 # ------------------------------------------------------------------------------
 # System & Kernel Optimizations
 # ------------------------------------------------------------------------------
 [optimization]
-# Proactively compact ZRAM swap memory
-zram_compaction = true
+# Proactively compact ZRAM swap memory (Default: false, enable via CLI or config)
+zram_compaction = false
 
 # Defragment and compact RAM page allocations (/proc/sys/vm/compact_memory)
-compact_memory = true
+compact_memory = false
 
 # Proactively reclaim inactive cached pages via Cgroup v2 memory.reclaim (Android 13+ / Kernel 5.4+)
-cgroup_memory_reclaim = true
+cgroup_memory_reclaim = false
 cgroup_reclaim_amount_mb = 128
 
 # Adaptively prioritize cache cleaning for frozen background apps (zero lock contention)
@@ -85,7 +85,7 @@ psi_cooldown_secs = 45
 f2fs_gc_urgent = true
 
 # Issue FITRIM storage wear-leveling on mounted flash partitions
-fstrim_partitions = true
+fstrim_partitions = false
 
 # Target partitions for FITRIM
 trim_mount_points = [
@@ -105,8 +105,8 @@ whitelist_packages = [
     "com.google.android.gms"
 ]
 
-# File/folder substring patterns that must NEVER be deleted under any circumstances
-protected_substrings = [
+# File/folder directory names that must NEVER be deleted under any circumstances
+protected_directory_names = [
     ".nomedia",
     "shared_prefs",
     "databases",

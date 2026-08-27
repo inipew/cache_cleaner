@@ -4,6 +4,6 @@ pub mod selinux;
 pub mod users;
 
 pub use android_prop::AndroidSystemInfo;
-pub use encryption::{check_encryption_state, EncryptionState};
+pub use encryption::{check_encryption_state, EncryptionState, StorageState};
 pub use selinux::get_selinux_mode;
-pub use users::enumerate_users;
+pub use users::{enumerate_users, AndroidUser};

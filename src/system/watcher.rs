@@ -34,8 +34,7 @@ impl DaemonRunner {
 
         #[cfg(unix)]
         unsafe {
-            // Detach session and set safe umask
-            libc::setsid();
+            // Set safe umask (preserves init / supervisor session hierarchy)
             libc::umask(0o027);
         }
 

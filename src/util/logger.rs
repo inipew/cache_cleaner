@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::LOG_PATH;
 
-const MAX_LOG_SIZE_BYTES: u64 = 2 * 1024 * 1024; // 2 MB
+const MAX_LOG_SIZE_BYTES: u64 = 1536 * 1024; // 1.5 MB per file (Max 3 files = ~4.5 MB total)
 
 pub fn init_logger() {
     let mut builder = env_logger::Builder::from_default_env();
@@ -53,7 +53,7 @@ fn append_to_file(line: &str) {
 
     let mut state_guard = FILE_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    // Rotate or initialize file handle
+    // Initialize or check file handle
     if state_guard.is_none() {
         let initial_size = fs::metadata(path).map_or(0, |m| m.len());
         if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
@@ -64,15 +64,18 @@ fn append_to_file(line: &str) {
         }
     }
 
-
     if let Some(ref mut state) = *state_guard {
         let line_len = line.len() as u64 + 1;
 
         if state.current_size + line_len > MAX_LOG_SIZE_BYTES {
-            // Rotate log file
+            // Multi-generation log rotation: .log.2 <- .log.1 <- .log
             drop(state_guard.take());
-            let old_path = parent.join("cleaner.log.old");
-            let _ = fs::rename(path, old_path);
+            let log_1 = parent.join("cleaner.log.1");
+            let log_2 = parent.join("cleaner.log.2");
+
+            let _ = fs::remove_file(&log_2);
+            let _ = fs::rename(&log_1, &log_2);
+            let _ = fs::rename(path, &log_1);
 
             if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
                 *state_guard = Some(LogFileState {

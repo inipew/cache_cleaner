@@ -68,22 +68,22 @@ pub struct CleaningRulesConfig {
     #[serde(default = "default_true")]
     pub clean_image_caches: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub clean_thumbnails: bool,
 
     #[serde(default = "default_false")]
     pub clean_code_cache: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub clean_oem_logs: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub clean_crash_dumps: bool,
 
     #[serde(default = "default_keep_crashes")]
     pub keep_recent_crash_files: usize,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub clean_temp_apks: bool,
 
     #[serde(default = "default_min_file_age_hours")]
@@ -92,13 +92,13 @@ pub struct CleaningRulesConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizationConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub zram_compaction: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub compact_memory: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub cgroup_memory_reclaim: bool,
 
     #[serde(default = "default_reclaim_amount_mb")]
@@ -122,7 +122,7 @@ pub struct OptimizationConfig {
     #[serde(default = "default_true")]
     pub f2fs_gc_urgent: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub fstrim_partitions: bool,
 
     #[serde(default = "default_trim_mounts")]
@@ -134,8 +134,8 @@ pub struct SafetyConfig {
     #[serde(default = "default_whitelist_packages")]
     pub whitelist_packages: Vec<String>,
 
-    #[serde(default = "default_protected_substrings")]
-    pub protected_substrings: Vec<String>,
+    #[serde(alias = "protected_substrings", default = "default_protected_directory_names")]
+    pub protected_directory_names: Vec<String>,
 }
 
 fn default_maintenance_interval_secs() -> u64 {
@@ -175,7 +175,7 @@ fn default_keep_crashes() -> usize {
 }
 
 fn default_min_file_age_hours() -> u32 {
-    0 // 0 means all cache files regardless of age
+    24 // Default: 24 hours minimum age for cache files
 }
 
 fn default_reclaim_amount_mb() -> u64 {
@@ -210,7 +210,7 @@ fn default_whitelist_packages() -> Vec<String> {
     ]
 }
 
-fn default_protected_substrings() -> Vec<String> {
+fn default_protected_directory_names() -> Vec<String> {
     vec![
         ".nomedia".to_string(),
         "shared_prefs".to_string(),
@@ -228,12 +228,12 @@ impl Default for CleaningRulesConfig {
             clean_app_cache: default_true(),
             clean_webview_cache: default_true(),
             clean_image_caches: default_true(),
-            clean_thumbnails: default_true(),
+            clean_thumbnails: default_false(),
             clean_code_cache: default_false(),
-            clean_oem_logs: default_true(),
-            clean_crash_dumps: default_true(),
+            clean_oem_logs: default_false(),
+            clean_crash_dumps: default_false(),
             keep_recent_crash_files: default_keep_crashes(),
-            clean_temp_apks: default_true(),
+            clean_temp_apks: default_false(),
             min_file_age_hours: default_min_file_age_hours(),
         }
     }
@@ -242,9 +242,9 @@ impl Default for CleaningRulesConfig {
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
-            zram_compaction: default_true(),
-            compact_memory: default_true(),
-            cgroup_memory_reclaim: default_true(),
+            zram_compaction: default_false(),
+            compact_memory: default_false(),
+            cgroup_memory_reclaim: default_false(),
             cgroup_reclaim_amount_mb: default_reclaim_amount_mb(),
             freezer_aware_cleaning: default_true(),
             psi_adaptive_monitoring: default_true(),
@@ -252,7 +252,7 @@ impl Default for OptimizationConfig {
             psi_critical_stall_ms: default_psi_critical_stall_ms(),
             psi_cooldown_secs: default_psi_cooldown_secs(),
             f2fs_gc_urgent: default_true(),
-            fstrim_partitions: default_true(),
+            fstrim_partitions: default_false(),
             trim_mount_points: default_trim_mounts(),
         }
     }
@@ -262,7 +262,7 @@ impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
             whitelist_packages: default_whitelist_packages(),
-            protected_substrings: default_protected_substrings(),
+            protected_directory_names: default_protected_directory_names(),
         }
     }
 }
@@ -306,9 +306,9 @@ impl DaemonConfig {
             ));
         }
 
-        if self.safety.protected_substrings.is_empty() {
+        if self.safety.protected_directory_names.is_empty() {
             return Err(crate::error::CleanerError::Config(
-                "safety.protected_substrings cannot be empty".to_string(),
+                "safety.protected_directory_names cannot be empty".to_string(),
             ));
         }
 

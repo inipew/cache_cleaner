@@ -105,16 +105,19 @@ impl IpcServer {
     {
         for listener in &self.listeners {
             while let Ok((mut stream, _)) = listener.accept() {
-                if !self.is_peer_authorized(&stream) {
-                    log::warn!("Unauthorized IPC connection rejected");
-                    let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
-                    let _ = send_message(
-                        &mut stream,
-                        &Response::Error("Unauthorized caller UID".to_string()),
-                    );
-                    continue;
-                }
+                let caller_uid = match self.get_peer_uid(&stream) {
+                    Some(uid) if self.is_uid_allowed(uid) => uid,
+                    _ => {
+                        log::warn!("Unauthorized IPC connection rejected (unknown UID or no SO_PEERCRED)");
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(3)));
+                        let _ = send_message(
+                            &mut stream,
+                            &Response::Error("Unauthorized caller UID".to_string()),
+                        );
+                        continue;
+                    }
+                };
 
                 // Check active worker concurrency limit to protect against thread exhaustion DoS
                 let current_workers = self.active_workers.load(Ordering::Relaxed);
@@ -124,7 +127,7 @@ impl IpcServer {
                         MAX_CONCURRENT_IPC_WORKERS
                     );
                     let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(3)));
                     let _ = send_message(
                         &mut stream,
                         &Response::Error("Daemon IPC busy, please retry shortly".to_string()),
@@ -142,12 +145,31 @@ impl IpcServer {
                     .spawn(move || {
                         let _guard = worker_guard;
                         let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
-                        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(120)));
+                        // Tiered timeouts: 3s header read, 15s payload write
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
 
                         match read_message::<_, Command>(&mut stream) {
                             Ok(cmd) => {
-                                log::debug!("Received IPC command: {:?}", cmd);
+                                log::debug!("Received IPC command: {:?} from UID {}", cmd, caller_uid);
+
+                                // Granular RBAC Authorization check per command
+                                if !is_command_authorized(caller_uid, &cmd) {
+                                    log::warn!(
+                                        "UID {} unauthorized for requested command {:?}",
+                                        caller_uid,
+                                        cmd
+                                    );
+                                    let _ = send_message(
+                                        &mut stream,
+                                        &Response::Error(
+                                            "Permission denied: Insufficient privileges for this command"
+                                                .to_string(),
+                                        ),
+                                    );
+                                    return;
+                                }
+
                                 let resp = handler_clone(cmd);
                                 let _ = send_message(&mut stream, &resp);
                             }
@@ -161,7 +183,7 @@ impl IpcServer {
     }
 
     #[cfg(unix)]
-    fn is_peer_authorized(&self, stream: &UnixStream) -> bool {
+    fn get_peer_uid(&self, stream: &UnixStream) -> Option<u32> {
         let raw_fd = stream.as_raw_fd();
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -177,20 +199,38 @@ impl IpcServer {
         };
 
         if res == 0 {
-            let uid = cred.uid;
-            let current_uid = unsafe { libc::getuid() };
-            log::debug!(
-                "IPC peer connected with UID: {} (daemon UID: {})",
-                uid,
-                current_uid
-            );
-            // Allow same UID, root (0), system (1000), shell/adb (2000)
-            uid == current_uid || uid == 0 || uid == 1000 || uid == 2000
+            Some(cred.uid)
         } else {
-            // Fail-closed for security
-            log::warn!("Failed to retrieve SO_PEERCRED from peer, rejecting connection");
-            false
+            None
         }
+    }
+
+    #[cfg(unix)]
+    fn is_uid_allowed(&self, uid: u32) -> bool {
+        let current_uid = unsafe { libc::getuid() };
+        // Allow same UID, root (0), system (1000), shell/adb (2000)
+        uid == current_uid || uid == 0 || uid == 1000 || uid == 2000
+    }
+}
+
+#[cfg(unix)]
+pub fn is_command_authorized(caller_uid: u32, cmd: &Command) -> bool {
+    // UID 0 (root) is fully authorized for all operations
+    if caller_uid == 0 {
+        return true;
+    }
+
+    match cmd {
+        Command::GetStatus | Command::GetStats | Command::Ping | Command::Cancel => {
+            // Read-only queries and cancel allowed for system (1000) and shell (2000)
+            caller_uid == 1000 || caller_uid == 2000
+        }
+        Command::TriggerClean(params) if !params.deep && !params.trim => {
+            // Non-deep clean allowed for system (1000)
+            caller_uid == 1000
+        }
+        // Deep clean, trim, reload config, stop daemon strictly require root (0)
+        _ => false,
     }
 }
 

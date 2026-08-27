@@ -209,3 +209,56 @@ pub fn init_config(output: &Path) {
         Err(e) => eprintln!("Failed to write configuration: {}", e),
     }
 }
+
+pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
+    use crate::engine::rules::{Decision, RuleEngine, SkipReason};
+
+    let engine = RuleEngine::new(config.cleaning.clone(), config.safety.clone());
+    let decision = engine.evaluate_path(target_path);
+
+    println!("==================================================");
+    println!("              PATH DECISION AUDIT                 ");
+    println!("==================================================");
+    println!("  Target Path   : {}", target_path.display());
+    println!("  Exists on Disk: {}", target_path.exists());
+
+    #[cfg(unix)]
+    if let Ok(meta) = target_path.symlink_metadata() {
+        use std::os::unix::fs::MetadataExt;
+        println!("  Device / Inode: {} / {}", meta.dev(), meta.ino());
+        println!("  UID / GID     : {} / {}", meta.uid(), meta.gid());
+        println!("  Is Symlink    : {}", meta.file_type().is_symlink());
+        println!("  File Size     : {}", format_bytes(meta.len()));
+    }
+
+    println!("--------------------------------------------------");
+    match decision {
+        Decision::Delete { category, reason } => {
+            println!("  Action        : DELETE (Eligible for cleanup)");
+            println!("  Category      : {:?}", category);
+            println!("  Rule Reason   : {}", reason);
+            println!("  Min File Age  : {} hours", config.cleaning.min_file_age_hours);
+        }
+        Decision::Skip { reason } => {
+            println!("  Action        : SKIP (Protected / Ignored)");
+            match reason {
+                SkipReason::ProtectedDirectory(dir) => {
+                    println!("  Skip Reason   : Matched protected directory component: '{}'", dir);
+                }
+                SkipReason::WhitelistedPackage(pkg) => {
+                    println!("  Skip Reason   : Matched whitelisted package: '{}'", pkg);
+                }
+                SkipReason::CodeCacheProtected => {
+                    println!("  Skip Reason   : JIT / ART bytecode is protected by default");
+                }
+                SkipReason::DisabledByConfig(opt) => {
+                    println!("  Skip Reason   : Cleaning category is disabled by config: '{}'", opt);
+                }
+                SkipReason::NotRecognizedAsJunk => {
+                    println!("  Skip Reason   : Path does not match any recognized junk patterns");
+                }
+            }
+        }
+    }
+    println!("==================================================");
+}

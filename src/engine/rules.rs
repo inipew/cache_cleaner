@@ -3,6 +3,53 @@ use std::path::Path;
 use crate::config::{CleaningRulesConfig, SafetyConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JunkCategory {
+    AppCache,
+    WebViewCache,
+    ImageCache,
+    Thumbnail,
+    CodeCache,
+    OemLog,
+    CrashDump,
+    TempApk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    ProtectedDirectory(String),
+    WhitelistedPackage(String),
+    CodeCacheProtected,
+    DisabledByConfig(&'static str),
+    NotRecognizedAsJunk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    Delete {
+        category: JunkCategory,
+        reason: &'static str,
+    },
+    Skip {
+        reason: SkipReason,
+    },
+}
+
+impl Decision {
+    #[inline]
+    pub fn is_delete(&self) -> bool {
+        matches!(self, Decision::Delete { .. })
+    }
+
+    #[inline]
+    pub fn category(&self) -> Option<JunkCategory> {
+        match self {
+            Decision::Delete { category, .. } => Some(*category),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JunkType {
     AppCache,
     WebViewCache,
@@ -13,6 +60,64 @@ pub enum JunkType {
     CrashDump,
     TempApk,
     Ignored,
+}
+
+impl From<Decision> for JunkType {
+    fn from(decision: Decision) -> Self {
+        match decision {
+            Decision::Delete { category, .. } => match category {
+                JunkCategory::AppCache => JunkType::AppCache,
+                JunkCategory::WebViewCache => JunkType::WebViewCache,
+                JunkCategory::ImageCache => JunkType::ImageCache,
+                JunkCategory::Thumbnail => JunkType::Thumbnail,
+                JunkCategory::CodeCache => JunkType::CodeCache,
+                JunkCategory::OemLog => JunkType::OemLog,
+                JunkCategory::CrashDump => JunkType::CrashDump,
+                JunkCategory::TempApk => JunkType::TempApk,
+            },
+            Decision::Skip { .. } => JunkType::Ignored,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackagePolicy {
+    pub package: String,
+    pub allow_cache: bool,
+    pub allow_external_cache: bool,
+}
+
+/// Validates Android package name format: ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$
+pub fn is_valid_package_name(name: &str) -> bool {
+    let mut parts = name.split('.');
+    let first = match parts.next() {
+        Some(f) if !f.is_empty() => f,
+        _ => return false,
+    };
+
+    let mut first_chars = first.chars();
+    if !first_chars.next().map_or(false, |c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    if !first_chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+
+    let mut count = 1;
+    for part in parts {
+        if part.is_empty() {
+            return false;
+        }
+        let mut chars = part.chars();
+        if !chars.next().map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        count += 1;
+    }
+    count >= 2
 }
 
 pub struct RuleEngine {
@@ -47,43 +152,53 @@ impl RuleEngine {
         Self { rules, safety }
     }
 
-    /// Determines whether a given path is safe to delete and what kind of junk it is.
-    pub fn classify_path(&self, path: &Path) -> JunkType {
+    pub fn rules(&self) -> &CleaningRulesConfig {
+        &self.rules
+    }
+
+    pub fn safety(&self) -> &SafetyConfig {
+        &self.safety
+    }
+
+    /// Full policy evaluation producing a typed Decision (Delete or Skip with reason)
+    pub fn evaluate_path(&self, path: &Path) -> Decision {
         let path_str = path.to_string_lossy();
 
-        // 1. Safety Whitelist Check: NEVER touch protected critical files/directories
-        // Matches exact path component (e.g. "databases", "shared_prefs", "lib", "files", "keystore", "fpdata", ".nomedia")
-        // to prevent false positives where package names contain substrings (e.g. "com.libra.app" or "com.delivery.profiles").
-        for protected in &self.safety.protected_substrings {
+        // 1. Safety Protected Directories Check: Exact path component match
+        // E.g. "databases", "shared_prefs", "lib", "files", "keystore", "fpdata", ".nomedia"
+        for protected in &self.safety.protected_directory_names {
             if path
                 .components()
                 .any(|c| c.as_os_str() == protected.as_str())
             {
-                return JunkType::Ignored;
+                return Decision::Skip {
+                    reason: SkipReason::ProtectedDirectory(protected.clone()),
+                };
             }
         }
 
-        // Whitelist packages: Exact path segment match or prefix match (zero-allocation)
-        let has_whitelisted_pkg = self.safety.whitelist_packages.iter().any(|pkg| {
-            path.components().any(|c| {
+        // Whitelist packages: Exact path segment match or dot-separated component match
+        for pkg in &self.safety.whitelist_packages {
+            let matches_pkg = path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
                 s == *pkg || s.strip_prefix(pkg.as_str()).is_some_and(|rest| rest.starts_with('.'))
-            })
-        });
+            });
 
+            if matches_pkg {
+                let is_in_cache_folder = path.components().any(|c| {
+                    let s = c.as_os_str().to_string_lossy();
+                    s == "cache" || s == "app_cache"
+                });
 
-        // Whitelisted packages protect all files except standard /cache subfolders
-        let is_in_cache_folder = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == "cache" || s == "app_cache"
-        });
-
-        if has_whitelisted_pkg && !is_in_cache_folder {
-            return JunkType::Ignored;
+                if !is_in_cache_folder {
+                    return Decision::Skip {
+                        reason: SkipReason::WhitelistedPackage(pkg.clone()),
+                    };
+                }
+            }
         }
 
         // 2. Strict JIT / ART Code Cache Protection
-        // Ensure JIT bytecode (code_cache, oat, dalvik-cache, ART profiles) is NEVER cleaned unless explicitly enabled
         let is_jit_or_art = path.components().any(|c| {
             let s = c.as_os_str().to_string_lossy();
             s == "code_cache" || s == "oat" || s == "dalvik-cache"
@@ -96,9 +211,14 @@ impl RuleEngine {
 
         if is_jit_or_art {
             if self.rules.clean_code_cache {
-                return JunkType::CodeCache;
+                return Decision::Delete {
+                    category: JunkCategory::CodeCache,
+                    reason: "ART/JIT code cache enabled in config",
+                };
             } else {
-                return JunkType::Ignored;
+                return Decision::Skip {
+                    reason: SkipReason::CodeCacheProtected,
+                };
             }
         }
 
@@ -114,11 +234,20 @@ impl RuleEngine {
             || path_str.contains("app_textures")
             || path_str.contains("splash_cache");
 
-        if is_webview_cache && self.rules.clean_webview_cache {
-            return JunkType::WebViewCache;
+        if is_webview_cache {
+            if self.rules.clean_webview_cache {
+                return Decision::Delete {
+                    category: JunkCategory::WebViewCache,
+                    reason: "WebView/Chromium cache artifact",
+                };
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_webview_cache"),
+                };
+            }
         }
 
-        // B. Common image & network cache libraries (Fresco, Glide, Coil, OkHttp, Picasso, Volley)
+        // B. Common image & network cache libraries
         let is_image_or_net_cache = path.components().any(|c| {
             let s = c.as_os_str().to_string_lossy();
             s == "image_cache"
@@ -132,8 +261,17 @@ impl RuleEngine {
                 || s == "network_cache"
         });
 
-        if is_image_or_net_cache && self.rules.clean_image_caches {
-            return JunkType::ImageCache;
+        if is_image_or_net_cache {
+            if self.rules.clean_image_caches {
+                return Decision::Delete {
+                    category: JunkCategory::ImageCache,
+                    reason: "Application image or network cache library folder",
+                };
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_image_caches"),
+                };
+            }
         }
 
         // C. Thumbnail caches
@@ -147,43 +285,124 @@ impl RuleEngine {
                 || s == "micro_thumbnail"
         });
 
-        if is_thumbnail && self.rules.clean_thumbnails {
-            return JunkType::Thumbnail;
+        if is_thumbnail {
+            if self.rules.clean_thumbnails {
+                return Decision::Delete {
+                    category: JunkCategory::Thumbnail,
+                    reason: "Media thumbnail cache folder",
+                };
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_thumbnails"),
+                };
+            }
         }
 
-        // D. App internal/external cache (component-aware: matches exact "cache" or "app_cache" directory)
-        if is_in_cache_folder && self.rules.clean_app_cache {
-            return JunkType::AppCache;
+        // D. App internal/external cache folder
+        let is_in_cache_folder = path.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s == "cache" || s == "app_cache"
+        });
+
+        if is_in_cache_folder {
+            if self.rules.clean_app_cache {
+                return Decision::Delete {
+                    category: JunkCategory::AppCache,
+                    reason: "Standard Android application cache directory",
+                };
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_app_cache"),
+                };
+            }
         }
 
-        // E. OEM Vendor Logs (Anchored to system root directories)
+        // E. OEM Vendor Logs
         let is_oem_log_root = OEM_LOG_ROOTS.iter().any(|root| path.starts_with(root));
-        if is_oem_log_root && self.rules.clean_oem_logs {
-            return JunkType::OemLog;
+        if is_oem_log_root {
+            if self.rules.clean_oem_logs {
+                // Safe OEM log pattern filtering
+                let is_log_file = path_str.ends_with(".log")
+                    || path_str.ends_with(".txt")
+                    || path_str.ends_with(".old")
+                    || path_str.ends_with(".trace")
+                    || path_str.ends_with(".dump")
+                    || path_str.ends_with(".gz")
+                    || path_str.contains("/log/")
+                    || path_str.contains("/logs/")
+                    || path_str.contains("/mobilelog/")
+                    || path_str.contains("/netlog/")
+                    || path_str.contains("/connsyslog/");
+
+                if is_log_file || !path.is_file() {
+                    return Decision::Delete {
+                        category: JunkCategory::OemLog,
+                        reason: "OEM vendor diagnostic/debug log",
+                    };
+                }
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_oem_logs"),
+                };
+            }
         }
 
-        // F. Crash Dumps, ANR, and DropBox (Anchored to system root directories)
+        // F. Crash Dumps, ANR, and DropBox
         let is_crash_dump_root = CRASH_DUMP_ROOTS.iter().any(|root| path.starts_with(root));
-        if is_crash_dump_root && self.rules.clean_crash_dumps {
-            return JunkType::CrashDump;
+        if is_crash_dump_root {
+            if self.rules.clean_crash_dumps {
+                return Decision::Delete {
+                    category: JunkCategory::CrashDump,
+                    reason: "System crash dump or ANR trace",
+                };
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_crash_dumps"),
+                };
+            }
         }
 
         // G. Temporary APKs & Staged APKs
         let is_staged_apk = STAGED_APK_ROOTS.iter().any(|root| path.starts_with(root));
-        if is_staged_apk && self.rules.clean_temp_apks {
-            return JunkType::TempApk;
-        } else if path.starts_with("/data/local/tmp") && self.rules.clean_temp_apks {
+        if is_staged_apk {
+            if self.rules.clean_temp_apks {
+                return Decision::Delete {
+                    category: JunkCategory::TempApk,
+                    reason: "Staged package install cache",
+                };
+            } else {
+                return Decision::Skip {
+                    reason: SkipReason::DisabledByConfig("clean_temp_apks"),
+                };
+            }
+        } else if path.starts_with("/data/local/tmp") {
             let is_temp_artifact = path_str.ends_with(".apk")
                 || path_str.ends_with(".tmp")
                 || path_str.ends_with(".apks")
                 || path_str.ends_with(".xapk")
                 || path_str.ends_with(".dex");
             if is_temp_artifact {
-                return JunkType::TempApk;
+                if self.rules.clean_temp_apks {
+                    return Decision::Delete {
+                        category: JunkCategory::TempApk,
+                        reason: "Temporary APK or DEX artifact in /data/local/tmp",
+                    };
+                } else {
+                    return Decision::Skip {
+                        reason: SkipReason::DisabledByConfig("clean_temp_apks"),
+                    };
+                }
             }
         }
 
-        JunkType::Ignored
+        Decision::Skip {
+            reason: SkipReason::NotRecognizedAsJunk,
+        }
+    }
+
+    /// Determines whether a given path is safe to delete and what kind of junk it is.
+    pub fn classify_path(&self, path: &Path) -> JunkType {
+        self.evaluate_path(path).into()
     }
 
     pub fn get_system_junk_targets(&self) -> Vec<&'static str> {
@@ -208,16 +427,28 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn test_package_name_validation() {
+        assert!(is_valid_package_name("com.whatsapp"));
+        assert!(is_valid_package_name("com.android.chrome"));
+        assert!(is_valid_package_name("org.chromium.android_webview"));
+        assert!(is_valid_package_name("com.example.app_123"));
+
+        assert!(!is_valid_package_name("invalid"));
+        assert!(!is_valid_package_name("123.com.test"));
+        assert!(!is_valid_package_name("com.test..app"));
+        assert!(!is_valid_package_name(""));
+    }
+
+    #[test]
     fn test_jit_code_cache_is_strictly_protected_by_default() {
         let rules = CleaningRulesConfig {
             clean_app_cache: true,
-            clean_code_cache: false, // Default: JIT is NEVER touched
+            clean_code_cache: false,
             ..Default::default()
         };
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 
-        // JIT code_cache paths must ALWAYS be Ignored
         assert_eq!(
             engine.classify_path(Path::new("/data/data/com.android.chrome/code_cache")),
             JunkType::Ignored
@@ -283,7 +514,6 @@ mod tests {
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 
-        // Package named "com.geocache.navigator" or "com.cachet.app" must NOT have its databases or files cleaned!
         assert_eq!(
             engine.classify_path(Path::new(
                 "/data/data/com.geocache.navigator/databases/geocache.db"
@@ -296,8 +526,6 @@ mod tests {
             )),
             JunkType::Ignored
         );
-
-        // But its actual cache subfolder SHOULD be cleaned
         assert_eq!(
             engine.classify_path(Path::new(
                 "/data/data/com.geocache.navigator/cache/map_tile_12.png"
@@ -315,7 +543,6 @@ mod tests {
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 
-        // Files inside an app's files directory should NOT match OEM log rules even if naming overlaps
         assert_eq!(
             engine.classify_path(Path::new(
                 "/data/data/com.example.miui/files/custom_log.txt"
@@ -328,25 +555,22 @@ mod tests {
             )),
             JunkType::Ignored
         );
-
-        // But actual system root OEM logs SHOULD match
         assert_eq!(
             engine.classify_path(Path::new("/data/miui/debug_log.txt")),
             JunkType::OemLog
         );
         assert_eq!(
-            engine.classify_path(Path::new("/data/log/kernel_log.txt")),
+            engine.classify_path(Path::new("/data/log/kernel_log.log")),
             JunkType::OemLog
         );
     }
 
     #[test]
-    fn test_protected_substrings_cannot_be_deleted() {
+    fn test_protected_directory_names_cannot_be_deleted() {
         let rules = CleaningRulesConfig::default();
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 
-        // Protected files/folders must never be classified as junk
         assert_eq!(
             engine.classify_path(Path::new("/data/data/com.whatsapp/databases/msgstore.db")),
             JunkType::Ignored
@@ -368,7 +592,6 @@ mod tests {
             JunkType::Ignored
         );
 
-        // Packages containing substrings "lib", "files", "database" must NOT be ignored in their cache folder
         assert_eq!(
             engine.classify_path(Path::new("/data/data/com.libra.browser/cache/cached_image.png")),
             JunkType::AppCache
@@ -382,7 +605,6 @@ mod tests {
             JunkType::AppCache
         );
 
-        // But protected subfolders inside those same packages must still be ignored
         assert_eq!(
             engine.classify_path(Path::new("/data/data/com.libra.browser/databases/bookmarks.db")),
             JunkType::Ignored
@@ -406,7 +628,6 @@ mod tests {
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 
-        // Temp apk should be cleaned
         assert_eq!(
             engine.classify_path(Path::new("/data/local/tmp/base.apk")),
             JunkType::TempApk
@@ -416,7 +637,6 @@ mod tests {
             JunkType::TempApk
         );
 
-        // Sockets, scripts, binaries must NOT be classified as TempApk
         assert_eq!(
             engine.classify_path(Path::new("/data/local/tmp/cleaner.sock")),
             JunkType::Ignored

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -12,7 +13,8 @@ pub struct AndroidUser {
 #[must_use]
 pub fn enumerate_users() -> Vec<AndroidUser> {
     let mut users = Vec::new();
-    let mut user_ids = vec![0u32];
+    let mut user_ids = BTreeSet::new();
+    user_ids.insert(0u32);
 
     // 1. Check /data/system/users/
     if let Ok(entries) = fs::read_dir("/data/system/users") {
@@ -21,9 +23,7 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 if let Some(num_str) = file_name.strip_suffix(".xml") {
                     if let Ok(id) = num_str.parse::<u32>() {
-                        if !user_ids.contains(&id) {
-                            user_ids.push(id);
-                        }
+                        user_ids.insert(id);
                     }
                 }
             }
@@ -35,9 +35,7 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if let Ok(id) = name.parse::<u32>() {
-                    if !user_ids.contains(&id) {
-                        user_ids.push(id);
-                    }
+                    user_ids.insert(id);
                 }
             }
         }
@@ -48,9 +46,7 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if let Ok(id) = name.parse::<u32>() {
-                    if !user_ids.contains(&id) {
-                        user_ids.push(id);
-                    }
+                    user_ids.insert(id);
                 }
             }
         }
@@ -61,9 +57,7 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if let Ok(id) = name.parse::<u32>() {
-                    if !user_ids.contains(&id) {
-                        user_ids.push(id);
-                    }
+                    user_ids.insert(id);
                 }
             }
         }
@@ -74,16 +68,11 @@ pub fn enumerate_users() -> Vec<AndroidUser> {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if let Ok(id) = name.parse::<u32>() {
-                    if !user_ids.contains(&id) {
-                        user_ids.push(id);
-                    }
+                    user_ids.insert(id);
                 }
             }
         }
     }
-
-    user_ids.sort_unstable();
-    user_ids.dedup();
 
     for id in user_ids {
         // Canonical CE path: User 0 canonical is /data/data (since /data/user/0 is a symlink on Android)

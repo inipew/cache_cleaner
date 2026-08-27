@@ -111,7 +111,18 @@ mod tests {
 
     #[test]
     fn test_junk_classification() {
-        let rules = CleaningRulesConfig::default();
+        let rules = CleaningRulesConfig {
+            clean_app_cache: true,
+            clean_webview_cache: true,
+            clean_image_caches: true,
+            clean_thumbnails: true,
+            clean_code_cache: false,
+            clean_oem_logs: true,
+            clean_crash_dumps: true,
+            keep_recent_crash_files: 3,
+            clean_temp_apks: true,
+            min_file_age_hours: 0,
+        };
         let safety = SafetyConfig::default();
         let engine = RuleEngine::new(rules, safety);
 

@@ -54,6 +54,10 @@ pub fn dispatch_command(cli: Cli) {
             daemon_ctrl::reload_config();
         }
 
+        Commands::Explain { path } => {
+            diagnostics::explain_path(&config, &path);
+        }
+
         Commands::Info => {
             diagnostics::show_platform_info();
         }

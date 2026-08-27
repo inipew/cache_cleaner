@@ -11,7 +11,7 @@ cd "$PROJECT_ROOT"
 
 # Target Architecture & Defaults
 TARGET="aarch64-linux-android"
-API_LEVEL="${API_LEVEL:-36}" # Default: Android 9 (API 28) for maximum compatibility (Android 9 - 16+)
+API_LEVEL="${API_LEVEL:-28}" # Default: Android 9 (API 28) for maximum compatibility (Android 9 - 16+)
 DIST_DIR="$PROJECT_ROOT/dist"
 BIN_NAME="cache-cleaner-daemon"
 

@@ -23,13 +23,14 @@ All runtime files, sockets, locks, and logs are strictly fixed to:
 
 ## 🌟 Key Architecture & Highlights
 
-- **Zero-CPU Idle Sleep**: Operates strictly event-driven via Linux `epoll`, `timerfd`, and kernel Netlink `uevent`. Consumes **0.00% CPU** while sleeping and maintains a minimal memory footprint (< 3 MB RAM).
-- **Preemptive I/O & CancellationToken**: The moment the user turns the screen on or interacts with the phone, ongoing I/O disk traversals are paused/cancelled within milliseconds, ensuring zero UI frame-drops.
-- **Kernel Governor & CGroup Isolation**: Automatically sets CPU scheduling to `SCHED_IDLE` / nice +19, I/O scheduling to `IOPRIO_CLASS_IDLE` (priority 7), and migrates the process into `/dev/cpuset/background` or `/sys/fs/cgroup/background`.
-- **F2FS Native Garbage Collection**: Integrates directly with the Linux kernel F2FS sysfs subsystem (`/sys/fs/f2fs/*/gc_urgent`) to optimize NAND flash storage without freezing I/O.
-- **Inter-Process Communication (IPC)**: Powered by UNIX Domain Sockets (`/data/adb/cleaner/run/daemon` and `@cleaner_daemon`) with `SO_PEERCRED` caller UID authentication (root/system/shell).
-- **Kernel-Level Single Instance Mutex**: Uses non-blocking `flock(LOCK_EX | LOCK_NB)` on `/data/adb/cleaner/run/cleaner_daemon.lock` and signalfd for zero zombie processes.
-- **Multi-User & Private Space Aware**: Automatically resolves paths across multi-user profiles (`/data/user/0`, `/data/user/10`, `/data/user/11` - Android 15/16 Private Space) and respects File-Based Encryption (FBE: DE vs CE).
+- **Event-Driven Idle Sleep**: Operates strictly event-driven via Linux `epoll`, `timerfd`, and kernel Netlink `uevent`. Remains sleeping without polling loops and maintains a minimal memory footprint (< 3 MB RSS).
+- **Zero-TOCTOU File Traversal**: Directory traversal is performed strictly using fd-relative syscalls (`openat`, `fstatat(SYMLINK_NOFOLLOW)`, and `unlinkat`) with same-filesystem mount boundary enforcement (`st_dev` verification), preventing symlink directory escapes and race conditions.
+- **Preemptive I/O & CancellationToken**: The moment the user turns the screen on or interacts with the phone, ongoing I/O disk traversals yield and abort, minimizing impact on foreground UI responsiveness.
+- **Kernel Governor & CGroup Isolation**: Automatically sets CPU scheduling to `SCHED_IDLE` / nice +19, I/O scheduling to `IOPRIO_CLASS_IDLE` (priority 7), and migrates the process into background cgroups (`/dev/cpuset/background` or `/sys/fs/cgroup/background`).
+- **F2FS Native Garbage Collection**: Integrates with the Linux kernel F2FS sysfs subsystem (`/sys/fs/f2fs/*/gc_urgent`) to optimize NAND flash storage, restoring previous GC states upon exit.
+- **Inter-Process Communication (IPC)**: Powered by UNIX Domain Sockets (`/data/adb/cleaner/run/daemon` and `@cleaner_daemon`) with `SO_PEERCRED` caller UID authentication and granular per-command RBAC authorization (Root, System, Shell).
+- **Kernel-Level Single Instance Mutex**: Uses non-blocking `flock(LOCK_EX | LOCK_NB)` on `/data/adb/cleaner/run/cleaner_daemon.lock` and signalfd for clean lifecycle management.
+- **Multi-User & FBE Storage State Aware**: Resolves multi-user profiles dynamically using `BTreeSet` and respects File-Based Encryption (FBE: DE vs CE), ensuring locked CE storage is never touched.
 
 ---
 
@@ -54,20 +55,20 @@ cache_cleaner/
 │   │   ├── cancellation.rs      # Atomic CancellationToken
 │   │   ├── framework.rs         # pm trim-caches & idle-maintenance bridge
 │   │   ├── memory.rs            # ZRAM compaction & compact_memory
-│   │   ├── rules.rs             # Safe classification & whitelist engine
+│   │   ├── rules.rs             # Typed Decision & safety whitelist engine
 │   │   ├── storage.rs           # ioctl(FITRIM) NAND wear-leveling
-│   │   └── walker.rs            # Fast recursive directory scanner & unlinker
+│   │   └── walker.rs            # Fast recursive directory scanner & unlinker (fd-relative)
 │   ├── hardware/                # Hardware & Kernel sensing
-│   │   ├── f2fs.rs              # F2FS gc_urgent controller
+│   │   ├── f2fs.rs              # F2FS gc_urgent controller with RAII state restore
 │   │   ├── thermal.rs           # Thermal zones & battery temp reader
 │   │   └── uevent.rs            # Kernel Netlink power & screen watcher
 │   ├── ipc/                     # Inter-Process Communication
 │   │   ├── client.rs            # CLI client connector
-│   │   ├── protocol.rs          # Length-prefixed JSON protocol & enums
-│   │   └── server.rs            # Non-blocking UnixListener with peer auth
+│   │   ├── protocol.rs          # Length-prefixed JSON protocol & 64KB bounded framing
+│   │   └── server.rs            # Non-blocking UnixListener with peer auth & command RBAC
 │   ├── platform/                # Android platform specifics
 │   │   ├── android_prop.rs      # System properties reader (SDK 28-36+)
-│   │   ├── encryption.rs        # FBE (DE vs CE) decryption checker
+│   │   ├── encryption.rs        # FBE (DE vs CE) decryption checker & StorageState
 │   │   ├── selinux.rs           # SELinux mode & root validator
 │   │   └── users.rs             # Multi-user & Private Space enumerator
 │   ├── system/                  # Linux system & lifecycle
@@ -78,7 +79,8 @@ cache_cleaner/
 │   │   └── watcher.rs           # Epoll event loop & daemon lifecycle
 │   └── util/
 │       ├── io_fast.rs           # Fast format and I/O utilities
-│       └── logger.rs            # Dual console & cleaner.log file logger
+│       └── logger.rs            # Dual console & rotating cleaner.log file logger
+├── tests/                       # Unit, lifecycle, safety, and adversarial test suites
 └── README.md
 ```
 
@@ -88,11 +90,14 @@ cache_cleaner/
 
 ### 1. Lifecycle Commands
 ```bash
-# Start the daemon in the background (detaches cleanly)
+# Start the daemon in the background
 /data/adb/cleaner/bin/cleaner start
 
 # Check daemon status (State, Uptime, Screen state, Temperature, Freed bytes)
 /data/adb/cleaner/bin/cleaner status
+
+# Inspect rule engine decision and safety checks for a path
+/data/adb/cleaner/bin/cleaner explain /data/data/com.whatsapp/cache
 
 # Reload configuration without restarting (via SIGHUP / IPC)
 /data/adb/cleaner/bin/cleaner reload
@@ -106,13 +111,13 @@ cache_cleaner/
 
 ### 2. Manual Cleaning
 ```bash
-# Standard clean
+# Standard clean (safe app cache with 24h min age)
 /data/adb/cleaner/bin/cleaner clean
 
 # Deep clean (includes FITRIM storage wear-leveling and ZRAM compaction)
 /data/adb/cleaner/bin/cleaner clean --deep --trim --zram
 
-# Dry run (scan junk space without deleting)
+# Dry run (scan junk space and report breakdown without deleting)
 /data/adb/cleaner/bin/cleaner clean --dry-run
 ```
 

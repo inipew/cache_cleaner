@@ -188,7 +188,6 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
                     "/sys/fs/cgroup/background/cgroup.procs",
                     "/sys/fs/cgroup/system-background/cgroup.procs",
                     "/sys/fs/cgroup/restricted/cgroup.procs",
-                    "/sys/fs/cgroup/cgroup.procs",
                 ];
 
                 for path in &v2_targets {
@@ -218,7 +217,7 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
             }
 
             CgroupVersion::V1 | CgroupVersion::Hybrid => {
-                // In Cgroup v1 or Hybrid, iterate through EACH controller category independently
+                // In Cgroup v1 or Hybrid, iterate through background controllers
                 let controller_groups = [
                     (
                         "cpuset",
@@ -226,7 +225,6 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
                             "/dev/cpuset/background/tasks",
                             "/dev/cpuset/system-background/tasks",
                             "/dev/cpuset/restricted/tasks",
-                            "/dev/cpuset/tasks",
                         ][..],
                     ),
                     (
@@ -234,19 +232,17 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
                         &[
                             "/dev/cpuctl/background/tasks",
                             "/dev/cpuctl/system-background/tasks",
-                            "/dev/cpuctl/tasks",
                         ][..],
                     ),
                     (
                         "stune",
-                        &["/dev/stune/background/tasks", "/dev/stune/tasks"][..],
+                        &["/dev/stune/background/tasks"][..],
                     ),
                     (
                         "blkio",
                         &[
                             "/dev/blkio/background/tasks",
                             "/dev/blkio/system-background/tasks",
-                            "/dev/blkio/tasks",
                         ][..],
                     ),
                     ("memcg", &["/dev/memcg/apps/tasks", "/dev/memcg/tasks"][..]),

@@ -58,10 +58,8 @@ impl StorageOptimizer {
 
                     // Check if it is a block device and read-write
                     let is_rw = options.split(',').any(|o| o == "rw");
-                    let is_block_fs = matches!(
-                        fs_type,
-                        "f2fs" | "ext4" | "erofs" | "vfat" | "sdcardfs" | "fuse"
-                    );
+                    // Strict whitelist: Only f2fs and ext4 natively support FITRIM safely on Android
+                    let is_block_fs = matches!(fs_type, "f2fs" | "ext4");
                     let is_block_dev =
                         dev.starts_with("/dev/block/") || dev.starts_with("/dev/root");
 
@@ -89,7 +87,7 @@ impl StorageOptimizer {
                 let mut range = FstrimRange {
                     start: 0,
                     len: u64::MAX,
-                    minlen: 0,
+                    minlen: 512 * 1024, // 512 KiB minimum extent size
                 };
 
                 #[cfg(target_os = "android")]

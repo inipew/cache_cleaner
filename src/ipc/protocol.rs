@@ -135,10 +135,18 @@ pub enum ResponseData {
     Message(String),
 }
 
+pub const MAX_IPC_FRAME_SIZE: usize = 64 * 1024; // 64 KiB max frame size
+
 /// Send a length-prefixed JSON message over a stream
 #[allow(dead_code)]
 pub fn send_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> Result<()> {
     let payload = serde_json::to_vec(message)?;
+    if payload.len() > MAX_IPC_FRAME_SIZE {
+        return Err(CleanerError::Ipc(format!(
+            "Outgoing message size {} exceeded 64KB safety limit",
+            payload.len()
+        )));
+    }
     let len = payload.len() as u32;
     writer.write_all(&len.to_be_bytes())?;
     writer.write_all(&payload)?;
@@ -153,10 +161,10 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> Re
     reader.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
-    // Safety limit: 256 KB max for IPC messages
-    if len > 256 * 1024 {
+    // Safety limit: 64 KB max for IPC messages
+    if len > MAX_IPC_FRAME_SIZE {
         return Err(CleanerError::Ipc(format!(
-            "Payload size {} exceeded 256KB safety limit",
+            "Payload size {} exceeded 64KB safety limit",
             len
         )));
     }
