@@ -45,13 +45,13 @@ impl IpcClient {
             return Ok(stream);
         }
 
-        // 2. Try mandatory filesystem socket: /data/adb/cleaner/run/daemon
-        let is_root = unsafe { libc::getuid() == 0 };
-        let socket_paths: &[&str] = if is_root {
-            &[SOCKET_PATH]
-        } else {
-            &[SOCKET_PATH, "/tmp/cleaner.sock"]
-        };
+        // 2. Try the dao filesystem socket: /data/adb/cleaner/run/daemon
+        //
+        // NOTE: We intentionally do NOT fall back to /tmp/cleaner.sock. /tmp is world-writable
+        // (and sticky), so an attacker could pre-create a socket there and man-in-the-middle IPC
+        // requests (reading status/commands or sending forged responses). Only the root-owned,
+        // permission-controlled filesystem socket is trusted.
+        let socket_paths: &[&str] = &[SOCKET_PATH];
 
         for path in socket_paths {
             if Path::new(path).exists() {

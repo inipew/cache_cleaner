@@ -423,6 +423,7 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
         maintenance_interval_secs,
         false,
     );
+    ctx.set_screen_off_since(state.screen_off_since);
 
     if let Some(ref sock) = uevent_socket {
         let queued = sock.read_events();
@@ -444,6 +445,7 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
                         maintenance_interval_secs,
                         false,
                     );
+                    ctx.set_screen_off_since(state.screen_off_since);
                 }
             }
         }
@@ -498,7 +500,13 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
                 ipc_triggered = true;
             } else if let Some(ref pw) = psi_watcher {
                 if let Some(level) = pw.identify_fd(fd) {
-                    psi_level = Some(level);
+                    // When multiple PSI triggers fire in the same epoll batch, take the
+                    // strongest level. Failing to do so can silently downgrade a critical
+                    // stall to moderate depending on event iteration order.
+                    psi_level = Some(match psi_level {
+                        Some(current) if current >= level => current,
+                        _ => level,
+                    });
                 }
             }
         }
@@ -551,6 +559,9 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
         for ev in events_to_process {
             let actions = state.reduce(ev, now, min_off_secs, maint_secs, is_cleaning);
 
+            // Propagate authoritative screen-off time to runtime for idle assessment via IPC
+            ctx.set_screen_off_since(state.screen_off_since);
+
             for action in actions {
                 match action {
                     LoopAction::None => {}
@@ -587,6 +598,7 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
                             maint_secs,
                             ctx.is_cleaning(),
                         );
+                        ctx.set_screen_off_since(state.screen_off_since);
                         for sa in sub_actions {
                             if let LoopAction::PreemptCleaning(r) = sa {
                                 log::info!("Preempting cleaning operation (reconciled): {r}");
@@ -626,6 +638,10 @@ pub fn run_epoll_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
                                     ctx.set_state(DaemonState::Idle);
                                 }
                             }
+
+                            // Always Acknowledge/reset the trigger so the epoll loop does not
+                            // busy-poll on a still-signaled EPOLLPRI fd, even during cooldown.
+                            pw.drain_level(level);
                         }
                     }
 
@@ -694,6 +710,7 @@ pub fn run_fallback_loop(ctx: &DaemonContext, ipc_server: Option<&IpcServer>) {
             }
             ScreenState::Unknown => {}
         }
+        ctx.set_screen_off_since(screen_off_since);
 
         let interval_secs = ctx
             .config

@@ -17,7 +17,7 @@ pub struct PsiMetrics {
     pub full: Option<PsiMetricSample>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PsiPressureLevel {
     Normal,
     Moderate,
@@ -126,6 +126,41 @@ impl PsiWatcher {
     /// Records that an adaptive PSI response was executed
     pub fn record_response(&mut self) {
         self.last_response = Instant::now();
+    }
+
+    /// Drains the pending trigger event from a PSI fd whose level matches `level`.
+    /// The `/proc/pressure/*` trigger is level-triggered on EPOLLPRI: reading the fd
+    /// acknowledges and resets the "threshold crossed" indication. Without draining it
+    /// the fd stays signaled and the epoll loop busy-polls at 100% CPU.
+    #[cfg(unix)]
+    pub fn drain_level(&self, level: PsiPressureLevel) {
+        let fd = match level {
+            PsiPressureLevel::Critical => self.critical_fd,
+            PsiPressureLevel::Moderate => self.moderate_fd,
+            PsiPressureLevel::Normal => None,
+        };
+        if let Some(fd) = fd {
+            let mut buf = [0u8; 256];
+            loop {
+                let n = unsafe {
+                    libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
+                };
+                if n < 0 {
+                    let e = std::io::Error::last_os_error();
+                    // EAGAIN means the buffer has been fully drained
+                    if e.raw_os_error() == Some(libc::EAGAIN) {
+                        break;
+                    }
+                    if e.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    break;
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -301,18 +336,32 @@ fn open_psi_trigger(
         return None;
     }
 
-    let spec = format!("{trigger_type} {stall_us} {window_us}\0");
-    let written = unsafe {
-        libc::write(
-            fd,
-            spec.as_ptr().cast::<libc::c_void>(),
-            spec.len() - 1, // Exclude trailing null byte
-        )
-    };
-
-    if written <= 0 {
-        unsafe { libc::close(fd) };
-        return None;
+    let spec = format!("{trigger_type} {stall_us} {window_us}\n");
+    // Loop to handle partial writes / EINTR robustly
+    let bytes = spec.as_bytes();
+    let mut written_total = 0usize;
+    while written_total < bytes.len() {
+        let n = unsafe {
+            libc::write(
+                fd,
+                bytes[written_total..].as_ptr().cast::<libc::c_void>(),
+                bytes.len() - written_total,
+            )
+        };
+        if n < 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno == libc::EINTR {
+                continue;
+            }
+            unsafe { libc::close(fd) };
+            return None;
+        }
+        if n == 0 {
+            // Write should never report 0 for a non-empty buffer; treat as failure
+            unsafe { libc::close(fd) };
+            return None;
+        }
+        written_total += n as usize;
     }
 
     Some(fd)

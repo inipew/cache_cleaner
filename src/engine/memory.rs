@@ -50,6 +50,12 @@ impl MemoryOptimizer {
 
     /// Proactively reclaims inactive cached pages using Cgroup v2 memory.reclaim interface.
     /// This uses standard kernel LRU eviction without discarding hot UI/System caches.
+    ///
+    /// In cgroup v2 the hierarchy is a strict tree: writing to the root's `memory.reclaim`
+    /// already covers all children (background, apps, uid_*). Writing the full target to
+    /// overlapping paths causes severe over-reclamation (e.g. 44 paths × 512 MB = 22 GB
+    /// requested vs 4-8 GB actual RAM). To avoid this we prefer the root path; only if the
+    /// root is missing do we partition the target equally among discovered leaf paths.
     pub fn reclaim_cgroup_memory(target_mb: u64) -> bool {
         let paths = crate::system::cgroup::discover_memory_reclaim_paths();
         if paths.is_empty() {
@@ -59,14 +65,31 @@ impl MemoryOptimizer {
 
         let capped_mb = target_mb.min(2048); // Maximum 2 GB per single reclaim cycle
         let target_bytes = capped_mb.saturating_mul(1024 * 1024);
-        let payload = format!("{target_bytes}\n");
+
+        // Prefer root cgroup — it covers the entire hierarchy
+        let root_path = Path::new("/sys/fs/cgroup/memory.reclaim");
+        if root_path.exists() {
+            let payload = format!("{target_bytes}\n");
+            if fs::write(root_path, &payload).is_ok() {
+                log::info!(
+                    "Cgroup v2 memory reclaim (target: {capped_mb} MB) via root cgroup"
+                );
+                return true;
+            }
+            log::debug!("Root memory.reclaim write failed, falling back to leaf paths");
+        }
+
+        // Fallback: partition target equally among non-overlapping discovered paths
+        let share = target_bytes / paths.len() as u64;
+        let payload = format!("{share}\n");
 
         let mut success = false;
         for path in &paths {
             match fs::write(path, &payload) {
                 Ok(_) => {
                     log::info!(
-                        "Cgroup v2 memory reclaim (target: {capped_mb} MB) triggered successfully on {}",
+                        "Cgroup v2 memory reclaim (share: {} bytes) triggered on {}",
+                        share,
                         path.display()
                     );
                     success = true;
@@ -79,7 +102,6 @@ impl MemoryOptimizer {
                 }
             }
         }
-
 
         success
     }

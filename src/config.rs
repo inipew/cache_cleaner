@@ -219,9 +219,12 @@ fn default_trim_mounts() -> Vec<String> {
 
 fn default_whitelist_packages() -> Vec<String> {
     vec![
-        "android".to_string(),
         "com.android.systemui".to_string(),
+        "com.android.settings".to_string(),
+        "com.android.providers.settings".to_string(),
+        "com.android.providers.media".to_string(),
         "com.google.android.gms".to_string(),
+        "com.google.android.googlequicksearchbox".to_string(),
     ]
 }
 

@@ -201,8 +201,7 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
                         summary.fully_migrated = true;
                         break;
                     }
-                }
-            }
+                }            }
 
             CgroupVersion::V1 | CgroupVersion::Hybrid => {
                 // In Cgroup v1 or Hybrid, iterate through background controllers
@@ -260,6 +259,7 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
                         });
                     }
                 }
+                let _ = migrated_count;
 
                 // If hybrid, also attempt writing to v2 unified if available
                 if version == CgroupVersion::Hybrid {
@@ -281,7 +281,13 @@ pub fn migrate_to_background_cgroup() -> CgroupMigrationSummary {
                     }
                 }
 
-                summary.fully_migrated = migrated_count > 0;
+                // fully_migrated means the process was migrated to a background cgroup on
+                // EVERY available/present controller (no "none_found"/failed entries).
+                summary.fully_migrated = !summary.migrations.is_empty()
+                    && summary
+                        .migrations
+                        .iter()
+                        .all(|m| m.success);
             }
 
             CgroupVersion::None => {

@@ -69,7 +69,8 @@ fn append_to_file(line: &str) {
 
         if state.current_size + line_len > MAX_LOG_SIZE_BYTES {
             // Multi-generation log rotation: .log.2 <- .log.1 <- .log
-            drop(state_guard.take());
+            // Swap the file handle in place while holding the mutex so other threads never
+            // observe an inconsistent intermediate state (old handle + rotated-on-disk file).
             let log_1 = parent.join("cleaner.log.1");
             let log_2 = parent.join("cleaner.log.2");
 
@@ -77,11 +78,15 @@ fn append_to_file(line: &str) {
             let _ = fs::rename(&log_1, &log_2);
             let _ = fs::rename(path, &log_1);
 
-            if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
-                *state_guard = Some(LogFileState {
-                    file,
-                    current_size: 0,
-                });
+            match OpenOptions::new().create(true).append(true).open(path) {
+                Ok(file) => {
+                    state.file = file;
+                    state.current_size = 0;
+                }
+                Err(_) => {
+                    // Keep the old handle; the current line is dropped but state stays consistent
+                    return;
+                }
             }
         }
     }

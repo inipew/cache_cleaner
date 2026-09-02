@@ -10,6 +10,7 @@ use crate::hardware::{
     get_charger_state, get_screen_state, read_thermal, ChargerState, ScreenState,
 };
 use crate::ipc::protocol::{CleanParams, Command, DaemonStatus, Response, ResponseData};
+use crate::system::idle::ThermalHysteresisState;
 
 /// Formal state machine representation of the cleaner daemon lifecycle
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +49,10 @@ pub struct DaemonRuntimeState {
     pub total_freed_bytes: u64,
     pub is_cleaning: bool,
     pub shutdown_requested: bool,
+    /// Wall-clock instant when the screen turned off (for idle assessment via IPC)
+    pub screen_off_since: Option<Instant>,
+    /// Persisted thermal hysteresis state (for idle assessment via IPC)
+    pub thermal_state: ThermalHysteresisState,
 }
 
 impl Default for DaemonRuntimeState {
@@ -59,6 +64,8 @@ impl Default for DaemonRuntimeState {
             total_freed_bytes: 0,
             is_cleaning: false,
             shutdown_requested: false,
+            screen_off_since: None,
+            thermal_state: ThermalHysteresisState::Normal,
         }
     }
 }
@@ -102,6 +109,44 @@ impl DaemonContext {
     pub fn set_state(&self, state: DaemonState) {
         let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         rt.state = state;
+    }
+
+    /// Update the screen-off timestamp for idle assessment
+    pub fn set_screen_off_since(&self, since: Option<Instant>) {
+        let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        rt.screen_off_since = since;
+    }
+
+    /// Update the persisted thermal hysteresis state for idle assessment
+    pub fn set_thermal_state(&self, state: ThermalHysteresisState) {
+        let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        rt.thermal_state = state;
+    }
+
+    /// Current screen-off duration based on the authoritative tracked screen-off instant.
+    fn screen_off_duration(&self) -> Option<Duration> {
+        self.runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .screen_off_since
+            .map(|since| since.elapsed())
+    }
+
+    /// Computes and persists the canonical thermal hysteresis state from the live SoC
+    /// temperature, honoring hysteresis so the device must cool before recovering.
+    fn compute_thermal_state(&self, max_soc_temp_c: f32) -> ThermalHysteresisState {
+        let prev = self
+            .runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .thermal_state;
+        let next = if max_soc_temp_c > 0.0 {
+            ThermalHysteresisState::next_state(prev, max_soc_temp_c)
+        } else {
+            prev
+        };
+        self.set_thermal_state(next);
+        next
     }
 
     /// Returns whether a shutdown has been requested
@@ -317,7 +362,6 @@ impl DaemonContext {
                 };
 
                 let metrics = crate::system::proc_metrics::get_process_metrics();
-                let rt = self.runtime.read().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 let cpu_psi = crate::system::psi::read_cpu_pressure().map(|p| p.some.avg10);
                 let io_psi = crate::system::psi::read_io_pressure().map(|p| p.some.avg10);
@@ -326,9 +370,16 @@ impl DaemonContext {
                 let battery_pct = crate::hardware::get_battery_percent().unwrap_or(50);
                 let is_screen_on = matches!(get_screen_state(), ScreenState::On);
 
+                // Compute thermal/screen state BEFORE acquiring runtime read lock
+                // to avoid deadlock: both helpers internally take runtime.write().
+                let thermal_state = self.compute_thermal_state(thermal.max_soc_temp_c);
+                let screen_off_duration = self.screen_off_duration();
+
+                let rt = self.runtime.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+
                 let ctx = crate::system::idle::IdleContext {
                     screen: get_screen_state(),
-                    screen_off_duration: None,
+                    screen_off_duration,
                     charging: is_charging,
                     battery_percent: battery_pct,
                     cpu_psi_pct: cpu_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
@@ -347,7 +398,7 @@ impl DaemonContext {
                 let assessment = crate::system::idle::IdlePolicy::evaluate(
                     &ctx,
                     crate::system::idle::IdleState::Active,
-                    crate::system::idle::ThermalHysteresisState::Normal,
+                    thermal_state,
                     Duration::from_secs(300),
                 );
 
@@ -382,9 +433,13 @@ impl DaemonContext {
                 let battery_pct = crate::hardware::get_battery_percent().unwrap_or(50);
                 let is_screen_on = matches!(screen, ScreenState::On);
 
+                // Compute before any runtime read to avoid RwLock deadlock (see GetStatus)
+                let thermal_state = self.compute_thermal_state(thermal.max_soc_temp_c);
+                let screen_off_duration = self.screen_off_duration();
+
                 let ctx = crate::system::idle::IdleContext {
                     screen,
-                    screen_off_duration: None,
+                    screen_off_duration,
                     charging: is_charging,
                     battery_percent: battery_pct,
                     cpu_psi_pct: cpu_psi.map(crate::system::idle::SensorReading::available).unwrap_or_else(crate::system::idle::SensorReading::unsupported),
@@ -403,7 +458,7 @@ impl DaemonContext {
                 let assessment = crate::system::idle::IdlePolicy::evaluate(
                     &ctx,
                     crate::system::idle::IdleState::Active,
-                    crate::system::idle::ThermalHysteresisState::Normal,
+                    thermal_state,
                     Duration::from_secs(300),
                 );
 
@@ -424,40 +479,54 @@ impl DaemonContext {
                 self.cancel_token.reset();
 
                 log::info!(
-                    "Executing manual clean job via IPC (deep: {}, trim: {}, zram: {})...",
+                    "Spawning manual clean job via IPC (deep: {}, trim: {}, zram: {})...",
                     params.deep,
                     params.trim,
                     params.zram_compact
                 );
 
-                let report = {
-                    let engine = self.clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    engine.execute(&params, &self.cancel_token)
-                };
+                // Spawn a dedicated thread to avoid blocking the IPC worker for the
+                // entire duration of the clean (which can take 30s–several minutes).
+                let clean_engine = self.clean_engine.clone();
+                let cancel_token = self.cancel_token.clone();
+                let runtime = self.runtime.clone();
 
-                let now_ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let _ = std::thread::Builder::new()
+                    .name("ipc-triggered-clean".to_string())
+                    .stack_size(256 * 1024)
+                    .spawn(move || {
+                        let report = {
+                            let engine = clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            engine.execute(&params, &cancel_token)
+                        };
 
-                {
-                    let mut rt = self.runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    rt.last_cleaned_ts = Some(now_ts);
-                    rt.last_freed_bytes = report.total_freed_bytes;
-                    rt.total_freed_bytes += report.total_freed_bytes;
-                    rt.state = DaemonState::Idle;
-                    rt.is_cleaning = false;
-                }
+                        let now_ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
 
-                // Immediately release all heap memory back to kernel
-                crate::util::trim_heap_memory();
+                        {
+                            let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            rt.last_cleaned_ts = Some(now_ts);
+                            rt.last_freed_bytes = report.total_freed_bytes;
+                            rt.total_freed_bytes += report.total_freed_bytes;
+                            rt.state = DaemonState::Idle;
+                            rt.is_cleaning = false;
+                        }
 
-                log::info!(
-                    "Manual clean completed via IPC. Freed: {} across {} files",
-                    report.total_freed_bytes,
-                    report.deleted_files_count
-                );
-                Response::Success(ResponseData::Report(report))
+                        // Immediately release all heap memory back to kernel
+                        crate::util::trim_heap_memory();
+
+                        log::info!(
+                            "Manual clean completed via IPC. Freed: {} across {} files",
+                            report.total_freed_bytes,
+                            report.deleted_files_count
+                        );
+                    });
+
+                Response::Success(ResponseData::Message(
+                    "Manual clean started".to_string(),
+                ))
             }
             Command::GetStats => {
                 let metrics = crate::system::proc_metrics::get_process_metrics();

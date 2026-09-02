@@ -186,9 +186,9 @@ fn read_cpu_ticks(pid: Option<u32>) -> u64 {
         if let Some(pos) = content.rfind(')') {
             let rest = &content[pos + 1..];
             let mut iter = rest.split_ascii_whitespace();
-            // skip 0..10 fields after ')'
-            let utime_str = iter.nth(10); // utime is 11th token (0-indexed 10)
-            let stime_str = iter.next(); // stime is 12th token
+            // skip 0..11 fields after ')'
+            let utime_str = iter.nth(11); // utime is 12th token (0-indexed 11)
+            let stime_str = iter.next(); // stime is 13th token (0-indexed 12)
             if let (Some(u), Some(s)) = (utime_str, stime_str) {
                 let utime: u64 = u.parse().unwrap_or(0);
                 let stime: u64 = s.parse().unwrap_or(0);

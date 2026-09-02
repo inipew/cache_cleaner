@@ -1,13 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-/// 5-Level Idle State Machine
+/// Idle State Machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdleState {
     /// Screen ON or user active or critical load
     Active,
-    /// Screen ON, but user inactive
-    Background,
     /// Screen OFF, but grace period (< 5 min) not yet elapsed
     IdleCandidate,
     /// Screen OFF, grace period elapsed, thermal/load safe
@@ -20,7 +18,6 @@ impl IdleState {
     pub fn as_str(&self) -> &'static str {
         match self {
             IdleState::Active => "ACTIVE",
-            IdleState::Background => "BACKGROUND",
             IdleState::IdleCandidate => "IDLE_CANDIDATE",
             IdleState::Idle => "IDLE",
             IdleState::DeepIdle => "DEEP_IDLE",

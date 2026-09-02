@@ -22,8 +22,10 @@ pub struct WalkStats {
 
 #[inline]
 #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
-fn st_mtime_to_duration<T: TryInto<u64>>(st_mtime: T) -> Duration {
-    Duration::from_secs(st_mtime.try_into().unwrap_or(0))
+fn st_mtime_to_duration<S: TryInto<u64>, N: TryInto<u64>>(st_mtime: S, st_mtime_nsec: N) -> Duration {
+    let secs = st_mtime.try_into().unwrap_or(0);
+    let nsecs = st_mtime_nsec.try_into().unwrap_or(0) as u32;
+    Duration::new(secs, nsecs)
 }
 
 #[cfg(unix)]
@@ -173,6 +175,16 @@ impl<'a> DirectoryWalker<'a> {
                 }
             };
 
+            // Enforce device boundary — never cross mount points
+            let root_dev = match fstat(&dir_fd) {
+                Ok(st) => st.st_dev,
+                Err(_) => {
+                    log::debug!("Skipping crash dump dir {} (fstat failed)", dir.display());
+                    stats.skipped_files += 1;
+                    return stats;
+                }
+            };
+
             let mut crash_files: Vec<(String, u64, SystemTime, u64, u64)> = Vec::new();
             let mut buf = [MaybeUninit::uninit(); 8192];
             let mut raw_dir = RawDir::new(&dir_fd, &mut buf);
@@ -191,8 +203,13 @@ impl<'a> DirectoryWalker<'a> {
                     if entry.file_type() == FileType::RegularFile {
                         if let Ok(name_str) = std::str::from_utf8(name_bytes) {
                             if let Ok(st) = statat(&dir_fd, name_str, AtFlags::SYMLINK_NOFOLLOW) {
+                                // Never cross mount boundary
+                                if st.st_dev != root_dev {
+                                    stats.skipped_files += 1;
+                                    continue;
+                                }
                                 let mtime =
-                                    SystemTime::UNIX_EPOCH + st_mtime_to_duration(st.st_mtime);
+                                    SystemTime::UNIX_EPOCH + st_mtime_to_duration(st.st_mtime, st.st_mtime_nsec);
                                 crash_files.push((
                                     name_str.to_string(),
                                     st.st_size as u64,
@@ -280,7 +297,16 @@ impl<'a> DirectoryWalker<'a> {
 
     #[allow(unused_variables)]
     fn walk_internal(&self, dir: &Path, root_dev: u64, stats: &mut WalkStats, depth: usize) {
-        if depth > 20 || self.cancel_token.is_cancelled() {
+        if depth > 20 {
+            log::debug!(
+                "Skipping subtree at {} (depth limit exceeded: {})",
+                dir.display(),
+                depth
+            );
+            stats.skipped_files += 1;
+            return;
+        }
+        if self.cancel_token.is_cancelled() {
             return;
         }
 
@@ -398,21 +424,22 @@ impl<'a> DirectoryWalker<'a> {
                         } else if file_type == FileType::RegularFile {
                             let file_size = st.st_size as u64;
 
-                            // Strict timestamp check: handle clock skew / future timestamps safely
+                            // Always skip future-dated files (clock anomaly protection), regardless
+                            // of the min_age setting.
+                            let mtime =
+                                SystemTime::UNIX_EPOCH + st_mtime_to_duration(st.st_mtime, st.st_mtime_nsec);
+                            if now.duration_since(mtime).is_err() {
+                                stats.skipped_files += 1;
+                                continue;
+                            }
+
+                            // Strict timestamp check (only when min_age > 0)
                             if self.min_age.as_secs() > 0 {
-                                let mtime =
-                                    SystemTime::UNIX_EPOCH + st_mtime_to_duration(st.st_mtime);
-                                match now.duration_since(mtime) {
-                                    Ok(elapsed) if elapsed < self.min_age => {
+                                if let Ok(elapsed) = now.duration_since(mtime) {
+                                    if elapsed < self.min_age {
                                         stats.skipped_files += 1;
                                         continue;
                                     }
-                                    Err(_) => {
-                                        // Future timestamp -> clock anomaly -> skip safely!
-                                        stats.skipped_files += 1;
-                                        continue;
-                                    }
-                                    _ => {}
                                 }
                             }
 
@@ -522,7 +549,16 @@ impl<'a> DirectoryWalker<'a> {
         stats: &mut WalkStats,
         depth: usize,
     ) {
-        if depth > 20 || self.cancel_token.is_cancelled() {
+        if depth > 20 {
+            log::debug!(
+                "Skipping subtree at {} (depth limit exceeded: {})",
+                folder.display(),
+                depth
+            );
+            stats.skipped_files += 1;
+            return;
+        }
+        if self.cancel_token.is_cancelled() {
             return;
         }
 
@@ -535,7 +571,15 @@ impl<'a> DirectoryWalker<'a> {
                 Mode::empty(),
             ) {
                 Ok(fd) => fd,
-                Err(_) => return,
+                Err(err) => {
+                    log::debug!(
+                        "Skipping clean of folder {} (open failed: {})",
+                        folder.display(),
+                        err
+                    );
+                    stats.errors_count += 1;
+                    return;
+                }
             };
 
             let mut buf = [MaybeUninit::uninit(); 8192];
@@ -555,7 +599,10 @@ impl<'a> DirectoryWalker<'a> {
 
                 let entry = match entry_result {
                     Ok(e) => e,
-                    Err(_) => continue,
+                    Err(_) => {
+                        stats.errors_count += 1;
+                        continue;
+                    }
                 };
 
                 let file_name_bytes = entry.file_name().to_bytes();
@@ -565,7 +612,10 @@ impl<'a> DirectoryWalker<'a> {
 
                 let name_str = match std::str::from_utf8(file_name_bytes) {
                     Ok(s) => s,
-                    Err(_) => continue,
+                    Err(_) => {
+                        stats.skipped_files += 1;
+                        continue;
+                    }
                 };
 
                 let p = folder.join(name_str);
@@ -573,7 +623,10 @@ impl<'a> DirectoryWalker<'a> {
 
                 let st = match statat(&dir_fd, name_str, AtFlags::SYMLINK_NOFOLLOW) {
                     Ok(st) => st,
-                    Err(_) => continue,
+                    Err(_) => {
+                        stats.errors_count += 1;
+                        continue;
+                    }
                 };
 
                 if (st.st_dev as u64) != root_dev {
@@ -603,21 +656,31 @@ impl<'a> DirectoryWalker<'a> {
                 } else if file_type == FileType::Directory {
                     self.purge_folder_contents(&p, root_dev, stats, depth + 1);
                     if !self.dry_run {
-                        let _ = safe_unlink_entry(&dir_fd, name_str, root_dev, st.st_ino, FileType::Directory, AtFlags::REMOVEDIR);
+                        let removed = safe_unlink_entry(&dir_fd, name_str, root_dev, st.st_ino, FileType::Directory, AtFlags::REMOVEDIR);
+                        if !removed {
+                            stats.errors_count += 1;
+                            log::debug!(
+                                "Failed to remove directory {} after purging contents",
+                                p.display()
+                            );
+                        }
                     }
                 } else if file_type == FileType::RegularFile {
+                    // Always skip future-dated files (clock anomaly protection), regardless
+                    // of the min_age setting.
+                    let mtime =
+                        SystemTime::UNIX_EPOCH + st_mtime_to_duration(st.st_mtime, st.st_mtime_nsec);
+                    if now.duration_since(mtime).is_err() {
+                        stats.skipped_files += 1;
+                        continue;
+                    }
+
                     if self.min_age.as_secs() > 0 {
-                        let mtime = SystemTime::UNIX_EPOCH + st_mtime_to_duration(st.st_mtime);
-                        match now.duration_since(mtime) {
-                            Ok(elapsed) if elapsed < self.min_age => {
+                        if let Ok(elapsed) = now.duration_since(mtime) {
+                            if elapsed < self.min_age {
                                 stats.skipped_files += 1;
                                 continue;
                             }
-                            Err(_) => {
-                                stats.skipped_files += 1;
-                                continue;
-                            }
-                            _ => {}
                         }
                     }
 
@@ -679,22 +742,31 @@ impl<'a> DirectoryWalker<'a> {
                 } else if file_type.is_dir() {
                     self.purge_folder_contents(&p, root_dev, stats, depth + 1);
                     if !self.dry_run {
-                        let _ = fs::remove_dir(&p);
+                        if let Err(e) = fs::remove_dir(&p) {
+                            stats.errors_count += 1;
+                            log::debug!(
+                                "Failed to remove directory {} after purging contents: {e}",
+                                p.display()
+                            );
+                        }
                     }
                 } else if file_type.is_file() {
                     if let Ok(metadata) = entry.metadata() {
+                        let modified = metadata.modified().ok();
+                        // Always skip future-dated files (clock anomaly protection)
+                        if let Some(m) = modified {
+                            if now.duration_since(m).is_err() {
+                                stats.skipped_files += 1;
+                                continue;
+                            }
+                        }
                         if self.min_age.as_secs() > 0 {
-                            if let Ok(modified) = metadata.modified() {
-                                match now.duration_since(modified) {
-                                    Ok(elapsed) if elapsed < self.min_age => {
+                            if let Some(m) = modified {
+                                if let Ok(elapsed) = now.duration_since(m) {
+                                    if elapsed < self.min_age {
                                         stats.skipped_files += 1;
                                         continue;
                                     }
-                                    Err(_) => {
-                                        stats.skipped_files += 1;
-                                        continue;
-                                    }
-                                    _ => {}
                                 }
                             }
                         }

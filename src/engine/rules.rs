@@ -185,6 +185,17 @@ impl RuleEngine {
         &self.safety
     }
 
+    /// Checks whether the path lies within a directory that the cleaner treats as a
+    /// deletable cache/cleaning folder (`cache`, `app_cache`, `code_cache`). Inside such
+    /// folders, protected-name protection is relaxed so legitimate cache subfolders like
+    /// `.../cache/files/` are still cleaned, while `.../<pkg>/files/` stays protected.
+    fn path_is_inside_cleaning_folder(&self, path: &Path) -> bool {
+        path.components().any(|c| {
+            let s = c.as_os_str();
+            s == "cache" || s == "app_cache" || s == "code_cache"
+        })
+    }
+
     /// Full policy evaluation producing a typed Decision (Delete or Skip with reason)
     pub fn evaluate_path(&self, path: &Path) -> Decision {
         let path_str = path.to_string_lossy();
@@ -212,25 +223,42 @@ impl RuleEngine {
 
         // 2. Absolute Deny: Safety Protected Directory component match
         // E.g. "databases", "shared_prefs", "lib", "files", "keystore", "fpdata", ".nomedia"
-        for protected in &self.safety.protected_directory_names {
-            if path
-                .components()
-                .any(|c| c.as_os_str() == protected.as_str())
-            {
-                return Decision::Skip {
-                    reason: SkipReason::ProtectedDirectory(protected.clone()),
-                };
+        // Protection only applies when the protected name is NOT itself within a cache-classified
+        // subtree (e.g. `.../cache/files/` should be cleaned, `.../<pkg>/files/` must not be).
+        if !self.path_is_inside_cleaning_folder(path) {
+            for protected in &self.safety.protected_directory_names {
+                if path
+                    .components()
+                    .any(|c| c.as_os_str() == protected.as_str())
+                {
+                    return Decision::Skip {
+                        reason: SkipReason::ProtectedDirectory(protected.clone()),
+                    };
+                }
             }
         }
 
-        // 3. Absolute Deny: Whitelisted packages are 100% immune from any deletion
+        // 3. Absolute Deny: Whitelisted packages are 100% immune from any deletion.
+        // A whitelist entry is a package name (e.g. "com.google.android.gms"). We only match
+        // when a path component is the package name itself (exact) or a sub-package under a
+        // domain prefix (e.g. "com.android" matches "com.android.chrome"). This prevents a
+        // bare coincidental directory named like a whitelist token from being falsely protected.
         for pkg in &self.safety.whitelist_packages {
-            let matches_pkg = path.components().any(|c| {
-                let s = c.as_os_str().to_string_lossy();
-                s == *pkg || s.strip_prefix(pkg.as_str()).is_some_and(|rest| rest.starts_with('.'))
+            let is_valid_pkg = is_valid_package_name(pkg);
+            let matches = path.components().any(|c| {
+                let comp = c.as_os_str();
+                let exact = comp == pkg.as_str();
+                if is_valid_pkg && !exact {
+                    // Well-formed dotted package: also honor domain-prefix sub-package match
+                    comp.to_str().is_some_and(|s| {
+                        s.strip_prefix(pkg.as_str()).is_some_and(|r| r.starts_with('.'))
+                    })
+                } else {
+                    exact
+                }
             });
 
-            if matches_pkg {
+            if matches {
                 return Decision::Skip {
                     reason: SkipReason::WhitelistedPackage(pkg.clone()),
                 };
@@ -239,8 +267,8 @@ impl RuleEngine {
 
         // 2. Strict JIT / ART Code Cache Protection (NEVER in Safe or Balanced modes)
         let is_jit_or_art = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == "code_cache" || s == "oat" || s == "dalvik-cache"
+            let os = c.as_os_str();
+            os == "code_cache" || os == "oat" || os == "dalvik-cache"
         }) || path_str.ends_with(".prof")
             || path_str.ends_with(".cur.prof")
             || path_str.ends_with(".profm")
@@ -264,14 +292,21 @@ impl RuleEngine {
         // 3. Classify by path components and patterns
 
         // A. WebView / Chrome cache
-        let is_webview_cache = path_str.contains("app_webview/Default/Cache")
-            || path_str.contains("app_webview/Default/Code Cache")
-            || path_str.contains("app_webview/Default/GPUCache")
-            || path_str.contains("app_webview/Default/Service Worker/CacheStorage")
-            || path_str.contains("app_webview/Default/Service Worker/ScriptCache")
-            || path_str.contains("org.chromium.android_webview")
-            || path_str.contains("app_textures")
-            || path_str.contains("splash_cache");
+        // Use component/separator-boundary matching instead of raw substring to avoid
+        // false positives like `com.webviewextra/cache` or `webview_config/cache`.
+        let comps: Vec<&std::ffi::OsStr> =
+            path.components().map(|c| c.as_os_str()).collect();
+        let is_webview_cache =
+            comps.iter().any(|c| *c == "app_webview")
+                || comps
+                    .windows(2)
+                    .any(|w| w[0] == "app_webview" && (w[1] == "Default" || w[1] == "Cache"))
+                || comps.iter().any(|c| *c == "app_textures")
+                || comps.iter().any(|c| *c == "splash_cache")
+                || comps.iter().any(|c| {
+                    *c == "org.chromium.android_webview"
+                        || c.to_str().is_some_and(|s| s.starts_with("org.chromium.android_webview."))
+                });
 
         if is_webview_cache {
             if self.rules.clean_webview_cache {
@@ -288,16 +323,16 @@ impl RuleEngine {
 
         // B. Common image & network cache libraries
         let is_image_or_net_cache = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == "image_cache"
-                || s == "fresco_cache"
-                || s == "glide_cache"
-                || s == "coil_cache"
-                || s == "http-engine-cache"
-                || s == "picasso-cache"
-                || s == "volley"
-                || s == "disk_cache"
-                || s == "network_cache"
+            let os = c.as_os_str();
+            os == "image_cache"
+                || os == "fresco_cache"
+                || os == "glide_cache"
+                || os == "coil_cache"
+                || os == "http-engine-cache"
+                || os == "picasso-cache"
+                || os == "volley"
+                || os == "disk_cache"
+                || os == "network_cache"
         });
 
         if is_image_or_net_cache {
@@ -315,8 +350,8 @@ impl RuleEngine {
 
         // C. App internal/external cache folder
         let is_in_cache_folder = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == "cache" || s == "app_cache"
+            let os = c.as_os_str();
+            os == "cache" || os == "app_cache"
         });
 
         if is_in_cache_folder {
@@ -336,13 +371,13 @@ impl RuleEngine {
 
         // D. Thumbnail caches (Balanced or Aggressive only)
         let is_thumbnail = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == ".thumbnails"
-                || s == ".thumb"
-                || s == ".thumbcache"
-                || s == ".video_thumbnails"
-                || s == ".albumthumbs"
-                || s == "micro_thumbnail"
+            let os = c.as_os_str();
+            os == ".thumbnails"
+                || os == ".thumb"
+                || os == ".thumbcache"
+                || os == ".video_thumbnails"
+                || os == ".albumthumbs"
+                || os == "micro_thumbnail"
         });
 
         if is_thumbnail {
