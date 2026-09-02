@@ -1,9 +1,18 @@
 #[cfg(test)]
 mod tests {
-    use cache_cleaner_daemon::config::{CleaningRulesConfig, SafetyConfig};
+    use cache_cleaner_daemon::auth::AuthorizationEngine;
+    use cache_cleaner_daemon::catalog::TargetCatalog;
+    use cache_cleaner_daemon::config_pipeline::{EffectiveConfig, RawConfig, ValidatedConfig};
+    use cache_cleaner_daemon::domain::decision::PolicyDecision;
+    use cache_cleaner_daemon::domain::types::{AttemptId, GenerationId, JobId, UnixTimestamp};
     use cache_cleaner_daemon::engine::cancellation::CancellationToken;
-    use cache_cleaner_daemon::engine::rules::RuleEngine;
-    use cache_cleaner_daemon::engine::walker::DirectoryWalker;
+    use cache_cleaner_daemon::executor::CleanupExecutor;
+    use cache_cleaner_daemon::planner::CleanupPlanner;
+    use cache_cleaner_daemon::policy::PolicyEngine;
+    use cache_cleaner_daemon::safety::SafetyGate;
+    use cache_cleaner_daemon::scanner::CandidateScanner;
+    use cache_cleaner_daemon::verifier::PostconditionVerifier;
+
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::PathBuf;
@@ -33,20 +42,24 @@ mod tests {
 
         // Create directory tree:
         // sandbox/
-        // ├── cache/
-        // │   ├── normal_junk.tmp
-        // │   └── symlink_to_important -> sandbox/databases
-        // ├── databases/
-        // │   └── crucial_data.db
-        // ├── files/
-        // │   └── user_data.json
-        // └── shared_prefs/
-        //     └── settings.xml
+        // └── user_0/
+        //     └── com.example.testapp/
+        //         ├── cache/
+        //         │   ├── normal_junk.tmp
+        //         │   └── symlink_to_databases -> ../databases
+        //         ├── databases/
+        //         │   └── crucial_data.db
+        //         ├── files/
+        //         │   └── user_data.json
+        //         └── shared_prefs/
+        //             └── settings.xml
 
-        let cache_dir = sandbox.root.join("cache");
-        let databases_dir = sandbox.root.join("databases");
-        let files_dir = sandbox.root.join("files");
-        let prefs_dir = sandbox.root.join("shared_prefs");
+        let user_dir = sandbox.root.join("user_0");
+        let pkg_dir = user_dir.join("com.example.testapp");
+        let cache_dir = pkg_dir.join("cache");
+        let databases_dir = pkg_dir.join("databases");
+        let files_dir = pkg_dir.join("files");
+        let prefs_dir = pkg_dir.join("shared_prefs");
 
         fs::create_dir_all(&cache_dir).unwrap();
         fs::create_dir_all(&databases_dir).unwrap();
@@ -71,27 +84,71 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let trap_symlink = cache_dir.join("symlink_to_important");
+            let trap_symlink = cache_dir.join("symlink_to_databases");
             let _ = std::os::unix::fs::symlink(&databases_dir, &trap_symlink);
         }
 
-        let rules = CleaningRulesConfig {
-            clean_app_cache: true,
-            min_file_age_hours: 0,
+        // 1. Target Catalog registers the app cache
+        let catalog = TargetCatalog::new();
+        let registered = catalog.discover_android_user_targets(&user_dir).unwrap();
+        assert_eq!(registered, 1);
+
+        let snapshot = catalog.take_snapshot();
+        let target = snapshot.iter().next().expect("Target registered");
+
+        // 2. Candidate Scanner discovers items inside target
+        let scanner = CandidateScanner::new();
+        let candidates = scanner.scan_target(target).unwrap();
+
+        // 3. Safety Gate & Policy Engine
+        let safety = SafetyGate::new();
+        let policy = PolicyEngine::new();
+        let val_cfg = ValidatedConfig::from_raw(RawConfig {
+            min_app_cache_age_days: Some(0),
             ..Default::default()
-        };
-        let safety = SafetyConfig::default();
-        let engine = RuleEngine::new(rules, safety);
+        }).unwrap();
+        let eff_cfg = EffectiveConfig::new(snapshot.generation, val_cfg);
+        let now = UnixTimestamp::now();
+
+        let mut permits = Vec::new();
+        for cand in candidates {
+            if let Ok(validated) = safety.validate_candidate(cand, target) {
+                if let PolicyDecision::Allow(permit) = policy.evaluate_candidate(validated, target, &eff_cfg, now) {
+                    permits.push(permit);
+                }
+            }
+        }
+
+        // 4. Planner & Auth
+        let planner = CleanupPlanner::new();
+        let planned = planner.build_plan(JobId(1), snapshot.generation, permits);
+        let auth = AuthorizationEngine::new();
+        let authorized = auth.authorize_plan(planned.clone(), snapshot.generation, 300, GenerationId(1)).unwrap();
+
+        // 5. Executor & Verifier
+        let executor = CleanupExecutor::new();
         let cancel_token = CancellationToken::new();
-        let walker = DirectoryWalker::new(&engine, &cancel_token, 0, false);
+        let resource_mgr = cache_cleaner_daemon::resource::ResourceManager::default();
+        let verifier = PostconditionVerifier::new();
+        let safety_gate = SafetyGate::new();
 
-        // Run clean pass on sandbox root
-        let stats = walker.clean_directory(&sandbox.root);
+        let result = executor.execute_plan(
+            &authorized,
+            &snapshot,
+            AttemptId(1),
+            &cancel_token,
+            &resource_mgr,
+            None,
+            &safety_gate,
+            &verifier,
+        ).unwrap();
+        let _ = verifier.verify_plan_postcondition(&planned, &snapshot);
 
+        // Assertions:
         // 1. Junk in cache must be deleted
         assert!(!junk_file.exists(), "Junk file in cache should have been deleted");
 
-        // 2. Protected directories and their contents MUST NOT be deleted
+        // 2. Protected directories and their contents MUST NOT be deleted despite symlink trap
         assert!(db_file.exists(), "Databases file MUST NOT be deleted!");
         assert!(user_file.exists(), "User files MUST NOT be deleted!");
         assert!(pref_file.exists(), "Shared preferences MUST NOT be deleted!");
@@ -100,6 +157,6 @@ mod tests {
         let db_content = fs::read_to_string(&db_file).unwrap();
         assert_eq!(db_content.trim(), "CRUCIAL SQLITE DATABASE");
 
-        assert!(stats.files_deleted >= 1);
+        assert!(result.successful_operations >= 1);
     }
 }

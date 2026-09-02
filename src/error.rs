@@ -10,6 +10,11 @@ pub enum CleanerError {
     TomlSer(toml::ser::Error),
     Ipc(String),
     Config(String),
+    ConfigError(String),
+    SafetyViolation(String),
+    Storage(String),
+    ResourceExhausted(String),
+    Internal(String),
     DaemonAlreadyRunning(u32),
     DaemonNotRunning,
     Platform(String),
@@ -26,6 +31,11 @@ impl fmt::Display for CleanerError {
             Self::TomlSer(e) => write!(f, "TOML encode error: {e}"),
             Self::Ipc(msg) => write!(f, "IPC error: {msg}"),
             Self::Config(msg) => write!(f, "Configuration error: {msg}"),
+            Self::ConfigError(msg) => write!(f, "Configuration error: {msg}"),
+            Self::SafetyViolation(msg) => write!(f, "Safety violation: {msg}"),
+            Self::Storage(msg) => write!(f, "Storage error: {msg}"),
+            Self::ResourceExhausted(msg) => write!(f, "Resource exhausted: {msg}"),
+            Self::Internal(msg) => write!(f, "Internal error: {msg}"),
             Self::DaemonAlreadyRunning(pid) => {
                 write!(f, "Daemon is already running with PID {pid}")
             }
@@ -74,4 +84,3 @@ impl From<toml::ser::Error> for CleanerError {
 }
 
 pub type Result<T> = std::result::Result<T, CleanerError>;
-

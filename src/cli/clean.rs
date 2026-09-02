@@ -85,16 +85,21 @@ pub fn execute_clean(
         crate::system::governor::set_idle_priorities();
 
         let cancel_token = CancellationToken::new();
-        let engine = CleanEngine::new(config);
-        let report = engine.execute(&params, &cancel_token);
-
-        if json {
-            if let Ok(json_str) = serde_json::to_string_pretty(&report) {
-                println!("{json_str}");
+        let mut engine = CleanEngine::new(config);
+        match engine.execute(&params, &cancel_token) {
+            Ok(report) => {
+                if json {
+                    if let Ok(json_str) = serde_json::to_string_pretty(&report) {
+                        println!("{json_str}");
+                    }
+                } else {
+                    println!("[+] Standalone Clean Completed:");
+                    print_clean_report(&report);
+                }
             }
-        } else {
-            println!("[+] Standalone Clean Completed:");
-            print_clean_report(&report);
+            Err(e) => {
+                eprintln!("[-] Clean execution failed: {e}");
+            }
         }
     }
 }

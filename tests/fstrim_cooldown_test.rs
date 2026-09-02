@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use cache_cleaner_daemon::engine::pipeline::storage_opt::{
+    use cache_cleaner_daemon::engine::storage::{
         mark_fstrim_completed, record_freed_bytes_for_trim, should_run_fstrim,
     };
 

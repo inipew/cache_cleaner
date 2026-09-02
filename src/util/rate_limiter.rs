@@ -41,7 +41,7 @@ impl TokenBucketRateLimiter {
 
     pub fn new(initial_mode: ThrottleMode) -> Self {
         let rate = initial_mode.target_ops_per_sec();
-        let capacity = (rate as f64).min(Self::MAX_BURST_CAPACITY).max(1.0);
+        let capacity = (rate as f64).clamp(1.0, Self::MAX_BURST_CAPACITY);
         Self {
             state: Mutex::new(BucketState {
                 ops_per_sec: rate,
@@ -56,7 +56,7 @@ impl TokenBucketRateLimiter {
     pub fn set_mode(&self, mode: ThrottleMode) {
         let new_rate = mode.target_ops_per_sec();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let new_capacity = (new_rate as f64).min(Self::MAX_BURST_CAPACITY).max(1.0);
+        let new_capacity = (new_rate as f64).clamp(1.0, Self::MAX_BURST_CAPACITY);
         state.ops_per_sec = new_rate;
         state.capacity = new_capacity;
         // Clamp tokens to new capacity to prevent burst windfall

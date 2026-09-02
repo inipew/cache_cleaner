@@ -126,48 +126,8 @@ pub struct CleanReport {
 }
 
 impl CleanReport {
-    /// Accumulates walk stats for multi-user app cache passes
-    pub fn record_app_cache_stats(&mut self, stats: &crate::engine::walker::WalkStats) {
-        self.storage.app_cache_bytes += stats.bytes_freed;
-        self.storage.total_freed_bytes += stats.bytes_freed;
-        self.storage.deleted_files_count += stats.files_deleted;
-        self.storage.frozen_apps_cleaned += stats.frozen_apps_affected;
-        self.storage.active_apps_cleaned += stats.active_apps_affected;
-        self.storage.skipped_files_count += stats.skipped_files;
-        self.storage.errors_count += stats.errors_count;
-
-        self.sync_compat_fields();
-    }
-
-    /// Accumulates walk stats categorized by system junk category
-    pub fn record_system_junk_stats(
-        &mut self,
-        stats: &crate::engine::walker::WalkStats,
-        category: crate::engine::rules::JunkCategory,
-    ) {
-        match category {
-            crate::engine::rules::JunkCategory::OemLog => {
-                self.storage.oem_logs_bytes += stats.bytes_freed;
-            }
-            crate::engine::rules::JunkCategory::CrashDump => {
-                self.storage.crash_dumps_bytes += stats.bytes_freed;
-            }
-            crate::engine::rules::JunkCategory::TempApk => {
-                self.storage.temp_apks_bytes += stats.bytes_freed;
-            }
-            _ => {}
-        }
-
-        self.storage.total_freed_bytes += stats.bytes_freed;
-        self.storage.deleted_files_count += stats.files_deleted;
-        self.storage.skipped_files_count += stats.skipped_files;
-        self.storage.errors_count += stats.errors_count;
-
-        self.sync_compat_fields();
-    }
-
     /// Synchronizes flat compatibility fields from nested domain reports
-    fn sync_compat_fields(&mut self) {
+    pub fn sync_compat_fields(&mut self) {
         self.total_freed_bytes = self.storage.total_freed_bytes;
         self.deleted_files_count = self.storage.deleted_files_count;
         self.app_cache_freed_bytes = self.storage.app_cache_bytes;
@@ -194,6 +154,7 @@ impl CleanReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data")]
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     Success(ResponseData),
     Error(String),

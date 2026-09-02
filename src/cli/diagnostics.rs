@@ -211,10 +211,16 @@ pub fn init_config(output: &Path) {
 }
 
 pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
-    use crate::engine::rules::{Decision, RuleEngine, SkipReason};
-
-    let engine = RuleEngine::new(config.cleaning.clone(), config.safety.clone());
-    let decision = engine.evaluate_path(target_path);
+    use crate::config_pipeline::{EffectiveConfig, ValidatedConfig};
+    use crate::domain::candidate::Candidate;
+    use crate::domain::decision::PolicyDecision;
+    use crate::domain::target::{TargetClass, TargetDescriptor, TargetSafetyTier};
+    use crate::domain::types::{
+        ByteCount, CandidateId, DeviceNumber, FileIdentity, GenerationId, InodeNumber,
+        RelativePath, TargetId, UnixTimestamp,
+    };
+    use crate::policy::PolicyEngine;
+    use crate::safety::SafetyGate;
 
     println!("==================================================");
     println!("              PATH DECISION AUDIT                 ");
@@ -222,42 +228,115 @@ pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
     println!("  Target Path   : {}", target_path.display());
     println!("  Exists on Disk: {}", target_path.exists());
 
-    #[cfg(unix)]
-    if let Ok(meta) = target_path.symlink_metadata() {
-        use std::os::unix::fs::MetadataExt;
-        println!("  Device / Inode: {} / {}", meta.dev(), meta.ino());
-        println!("  UID / GID     : {} / {}", meta.uid(), meta.gid());
-        println!("  Is Symlink    : {}", meta.file_type().is_symlink());
-        println!("  File Size     : {}", format_bytes(meta.len()));
+    let meta = target_path.symlink_metadata().ok();
+    if let Some(ref m) = meta {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            println!("  Device / Inode: {} / {}", m.dev(), m.ino());
+            println!("  UID / GID     : {} / {}", m.uid(), m.gid());
+            println!("  Is Symlink    : {}", m.file_type().is_symlink());
+            println!("  File Size     : {}", format_bytes(m.len()));
+        }
     }
 
-    println!("--------------------------------------------------");
-    match decision {
-        Decision::Delete { category, reason } => {
-            println!("  Action        : DELETE (Eligible for cleanup)");
-            println!("  Category      : {:?}", category);
-            println!("  Rule Reason   : {}", reason);
-            println!("  Min File Age  : {} hours", config.cleaning.min_file_age_hours);
+    let val_cfg = ValidatedConfig {
+        maintenance_interval_secs: config.maintenance_interval_secs,
+        min_screen_off_secs: config.min_screen_off_secs,
+        max_soc_temp_c: config.max_soc_temp_c,
+        max_battery_temp_c: config.max_battery_temp_c,
+        min_app_cache_age_secs: (config.cleaning.min_file_age_hours as u64).saturating_mul(3600),
+        app_cache_threshold_bytes: ByteCount::new(50 * 1024 * 1024),
+        dry_run: false,
+        whitelist_packages: config.safety.whitelist_packages.clone(),
+        protected_paths: config
+            .safety
+            .protected_directory_names
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect(),
+        fstrim_interval_secs: 86400,
+        vacuum_db_interval_secs: 72 * 3600,
+    };
+    let eff_cfg = EffectiveConfig::new(GenerationId::INITIAL, val_cfg);
+
+    let dev = meta.as_ref().map(|m| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            m.dev()
         }
-        Decision::Skip { reason } => {
-            println!("  Action        : SKIP (Protected / Ignored)");
-            match reason {
-                SkipReason::ProtectedDirectory(dir) => {
-                    println!("  Skip Reason   : Matched protected directory component: '{}'", dir);
+        #[cfg(not(unix))]
+        {
+            0
+        }
+    }).unwrap_or(0);
+
+    let ino = meta.as_ref().map(|m| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            m.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            0
+        }
+    }).unwrap_or(0);
+
+    let parent_dir = target_path.parent().unwrap_or(target_path);
+    let file_name = target_path.file_name().and_then(|n| n.to_str()).unwrap_or("target");
+
+    let descriptor = TargetDescriptor {
+        target_id: TargetId::new("manual:audit:target"),
+        target_class: TargetClass::AppCache,
+        base_path: parent_dir.to_path_buf(),
+        dev: DeviceNumber(dev),
+        ino: InodeNumber(ino),
+        owner_uid: 0,
+        owner_gid: 0,
+        package_name: None,
+        safety_tier: TargetSafetyTier::StandardCache,
+        catalog_generation: GenerationId::INITIAL,
+    };
+
+    let candidate = Candidate {
+        candidate_id: CandidateId(1),
+        target_id: descriptor.target_id.clone(),
+        rel_path: RelativePath::parse(file_name).unwrap_or_else(RelativePath::empty),
+        identity: FileIdentity::new(dev, ino),
+        size_bytes: ByteCount::new(meta.as_ref().map(|m| m.len()).unwrap_or(0)),
+        mtime: UnixTimestamp::now(),
+        atime: None,
+        is_dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+        is_symlink: meta.as_ref().map(|m| m.file_type().is_symlink()).unwrap_or(false),
+    };
+
+    let safety = SafetyGate::new();
+    let policy = PolicyEngine::new();
+
+    println!("--------------------------------------------------");
+    match safety.validate_candidate(candidate, &descriptor) {
+        Ok(validated) => {
+            let decision = policy.evaluate_candidate(validated, &descriptor, &eff_cfg, UnixTimestamp::now());
+            match decision {
+                PolicyDecision::Allow(permit) => {
+                    println!("  Action         : ALLOW (Eligible for deletion)");
+                    println!("  Decision Reason: {}", permit.reason);
                 }
-                SkipReason::WhitelistedPackage(pkg) => {
-                    println!("  Skip Reason   : Matched whitelisted package: '{}'", pkg);
+                PolicyDecision::Deny(deny) => {
+                    println!("  Action         : DENY (Protected / Ignored)");
+                    println!("  Decision Reason: {}", deny.reason);
                 }
-                SkipReason::CodeCacheProtected => {
-                    println!("  Skip Reason   : JIT / ART bytecode is protected by default");
-                }
-                SkipReason::DisabledByConfig(opt) => {
-                    println!("  Skip Reason   : Cleaning category is disabled by config: '{}'", opt);
-                }
-                SkipReason::NotRecognizedAsJunk => {
-                    println!("  Skip Reason   : Path does not match any recognized junk patterns");
+                PolicyDecision::Skip(skip) => {
+                    println!("  Action         : SKIP");
+                    println!("  Decision Reason: {}", skip.reason);
                 }
             }
+        }
+        Err(e) => {
+            println!("  Action         : REJECTED BY SAFETY GATE");
+            println!("  Safety Error   : {}", e);
         }
     }
     println!("==================================================");

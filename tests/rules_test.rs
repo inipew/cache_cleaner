@@ -1,228 +1,140 @@
 #[cfg(test)]
 mod tests {
-    use cache_cleaner_daemon::config::{CleaningRulesConfig, SafetyConfig, SafetyMode};
-    use cache_cleaner_daemon::engine::rules::{JunkType, RuleEngine};
-    use std::path::Path;
+    use cache_cleaner_daemon::config_pipeline::{EffectiveConfig, RawConfig, ValidatedConfig};
+    use cache_cleaner_daemon::domain::candidate::Candidate;
+    use cache_cleaner_daemon::domain::decision::{DecisionReason, PolicyDecision};
+    use cache_cleaner_daemon::domain::target::{TargetClass, TargetDescriptor, TargetSafetyTier};
+    use cache_cleaner_daemon::domain::types::{
+        ByteCount, CandidateId, DeviceNumber, FileIdentity, GenerationId, InodeNumber,
+        RelativePath, TargetId, UnixTimestamp,
+    };
+    use cache_cleaner_daemon::policy::PolicyEngine;
+    use cache_cleaner_daemon::safety::SafetyGate;
+    use std::path::PathBuf;
 
-    #[test]
-    fn test_whitelist_safety() {
-        let rules = CleaningRulesConfig::default();
-        let safety = SafetyConfig::default();
-        let engine = RuleEngine::new(rules, safety);
+    fn create_test_context(pkg_name: Option<&str>, target_class: TargetClass) -> (TargetDescriptor, EffectiveConfig) {
+        let descriptor = TargetDescriptor {
+            target_id: TargetId::new("test:target"),
+            target_class,
+            base_path: PathBuf::from("/data/user/0/test/cache"),
+            dev: DeviceNumber(1),
+            ino: InodeNumber(100),
+            owner_uid: 1000,
+            owner_gid: 1000,
+            package_name: pkg_name.map(|s| s.to_string()),
+            safety_tier: TargetSafetyTier::StandardCache,
+            catalog_generation: GenerationId::INITIAL,
+        };
 
-        // Databases, shared_prefs, .nomedia must ALWAYS be ignored
-        assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.whatsapp/databases/msgstore.db")),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.whatsapp/shared_prefs/prefs.xml")),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.whatsapp/files/keystore")),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/data/com.whatsapp/lib/libnative.so")),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/sdcard/DCIM/Camera/.nomedia")),
-            JunkType::Ignored
-        );
+        let val_cfg = ValidatedConfig::from_raw(RawConfig {
+            min_app_cache_age_days: Some(3),
+            whitelist_packages: Some(vec!["com.google.android.gms".into(), "com.android.vending".into()]),
+            ..Default::default()
+        }).unwrap();
 
-        // Whitelisted app (e.g. android / com.google.android.gms) MUST be completely ignored (Absolute Deny)
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.google.android.gms/cache/temp_123.tmp"
-            )),
-            JunkType::Ignored
-        );
+        let eff_cfg = EffectiveConfig::new(GenerationId::INITIAL, val_cfg);
+        (descriptor, eff_cfg)
     }
 
     #[test]
-    fn test_package_name_containing_cache_string_safety() {
-        let rules = CleaningRulesConfig::default();
-        let safety = SafetyConfig::default();
-        let engine = RuleEngine::new(rules, safety);
+    fn test_whitelist_safety() {
+        let (descriptor, eff_cfg) = create_test_context(Some("com.google.android.gms"), TargetClass::AppCache);
+        let candidate = Candidate {
+            candidate_id: CandidateId(1),
+            target_id: descriptor.target_id.clone(),
+            rel_path: RelativePath::parse("temp_123.tmp").unwrap(),
+            identity: FileIdentity::new(1, 101),
+            size_bytes: ByteCount::new(1024),
+            mtime: UnixTimestamp(100),
+            atime: None,
+            is_dir: false,
+            is_symlink: false,
+        };
 
-        // App names containing "cache" or "temp" or "databases" must NOT be deleted unless within /cache/
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.app.cachemaster/files/user_settings.json"
-            )),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.test.template/databases/main.sqlite"
-            )),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.database.explorer/shared_prefs/config.xml"
-            )),
-            JunkType::Ignored
-        );
+        let safety = SafetyGate::new();
+        let validated = safety.validate_candidate(candidate, &descriptor).unwrap();
+        let policy = PolicyEngine::new();
+        let decision = policy.evaluate_candidate(validated, &descriptor, &eff_cfg, UnixTimestamp(1_000_000));
 
-        // But its actual /cache folder SHOULD be AppCache
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.geocache.navigator/cache/tile.png"
-            )),
-            JunkType::AppCache
-        );
+        assert!(matches!(
+            decision,
+            PolicyDecision::Deny(deny) if deny.reason == DecisionReason::PackageWhitelisted
+        ));
     }
 
     #[test]
     fn test_jit_art_bytecode_protection() {
-        let rules = CleaningRulesConfig {
-            clean_code_cache: false,
-            ..Default::default()
+        let (descriptor, eff_cfg) = create_test_context(Some("com.example.app"), TargetClass::AppCache);
+        let candidate = Candidate {
+            candidate_id: CandidateId(1),
+            target_id: descriptor.target_id.clone(),
+            rel_path: RelativePath::parse("compiled_view.dex").unwrap(),
+            identity: FileIdentity::new(1, 101),
+            size_bytes: ByteCount::new(1024),
+            mtime: UnixTimestamp(100),
+            atime: None,
+            is_dir: false,
+            is_symlink: false,
         };
-        let safety = SafetyConfig::default();
-        let engine = RuleEngine::new(rules, safety);
 
-        // JIT / ART profile and bytecode files must NEVER be cleaned
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.whatsapp/code_cache/compiled_view.dex"
-            )),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/app/com.whatsapp/oat/arm64/base.odex")),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/app/com.whatsapp/oat/arm64/base.vdex")),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/misc/profiles/cur/0/com.whatsapp/primary.prof"
-            )),
-            JunkType::Ignored
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/dalvik-cache/arm64/boot.art")),
-            JunkType::Ignored
-        );
+        let safety = SafetyGate::new();
+        let validated = safety.validate_candidate(candidate, &descriptor).unwrap();
+        let policy = PolicyEngine::new();
+        let decision = policy.evaluate_candidate(validated, &descriptor, &eff_cfg, UnixTimestamp(1_000_000));
+
+        assert!(matches!(
+            decision,
+            PolicyDecision::Deny(deny) if deny.reason == DecisionReason::ProtectedBytecode
+        ));
     }
 
     #[test]
-    fn test_junk_classification() {
-        let rules = CleaningRulesConfig {
-            clean_app_cache: true,
-            clean_webview_cache: true,
-            clean_image_caches: true,
-            clean_thumbnails: true,
-            clean_code_cache: false,
-            clean_oem_logs: true,
-            clean_crash_dumps: true,
-            keep_recent_crash_files: 3,
-            clean_temp_apks: true,
-            min_file_age_hours: 0,
+    fn test_age_retention_policy_evaluation() {
+        let (descriptor, eff_cfg) = create_test_context(Some("com.example.app"), TargetClass::AppCache);
+        let now = UnixTimestamp::now();
+
+        // 1. Fresh file (under 3 days) -> Denied by retention grace period
+        let fresh_candidate = Candidate {
+            candidate_id: CandidateId(1),
+            target_id: descriptor.target_id.clone(),
+            rel_path: RelativePath::parse("fresh.tmp").unwrap(),
+            identity: FileIdentity::new(1, 101),
+            size_bytes: ByteCount::new(1024),
+            mtime: now, // 0 seconds old
+            atime: None,
+            is_dir: false,
+            is_symlink: false,
         };
-        let safety = SafetyConfig {
-            mode: SafetyMode::Aggressive,
-            ..Default::default()
+
+        let safety = SafetyGate::new();
+        let validated_fresh = safety.validate_candidate(fresh_candidate, &descriptor).unwrap();
+        let policy = PolicyEngine::new();
+        let decision_fresh = policy.evaluate_candidate(validated_fresh, &descriptor, &eff_cfg, now);
+        assert!(matches!(
+            decision_fresh,
+            PolicyDecision::Deny(deny) if deny.reason == DecisionReason::WithinRetentionGracePeriod
+        ));
+
+        // 2. Old file (over 3 days = 259,200s old) -> Allowed
+        let old_mtime = UnixTimestamp(now.as_secs().saturating_sub(400_000));
+        let old_candidate = Candidate {
+            candidate_id: CandidateId(2),
+            target_id: descriptor.target_id.clone(),
+            rel_path: RelativePath::parse("old.tmp").unwrap(),
+            identity: FileIdentity::new(1, 102),
+            size_bytes: ByteCount::new(2048),
+            mtime: old_mtime,
+            atime: None,
+            is_dir: false,
+            is_symlink: false,
         };
-        let engine = RuleEngine::new(rules, safety);
 
-        // Standard app cache
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.instagram.android/cache/temp_123.tmp"
-            )),
-            JunkType::AppCache
-        );
-
-        // WebView cache
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.example.app/app_webview/Default/Cache/data_0"
-            )),
-            JunkType::WebViewCache
-        );
-
-        // Image cache (Glide / Fresco / Coil)
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.example.app/cache/image_cache/abc"
-            )),
-            JunkType::ImageCache
-        );
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/data/com.example.app/cache/fresco_cache/v2/entry"
-            )),
-            JunkType::ImageCache
-        );
-
-        // Thumbnails
-        assert_eq!(
-            engine.classify_path(Path::new("/sdcard/DCIM/.thumbnails/thumb_001.jpg")),
-            JunkType::Thumbnail
-        );
-
-        // Multi-OEM logs
-        assert_eq!(
-            engine.classify_path(Path::new("/data/miui/gallery/log.txt")),
-            JunkType::OemLog
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/mqsas/crash.log")),
-            JunkType::OemLog
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/sec_log/dump.log")),
-            JunkType::OemLog
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/oppo/log/sys.log")),
-            JunkType::OemLog
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/vendor/mtklog/mobilelog.txt")),
-            JunkType::OemLog
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/log/hilog/hilog.001")),
-            JunkType::OemLog
-        );
-
-        // Tombstones / ANR / DropBox
-        assert_eq!(
-            engine.classify_path(Path::new("/data/tombstones/tombstone_01")),
-            JunkType::CrashDump
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/anr/traces.txt")),
-            JunkType::CrashDump
-        );
-        assert_eq!(
-            engine.classify_path(Path::new(
-                "/data/system/dropbox/data_app_crash@12345.txt.gz"
-            )),
-            JunkType::CrashDump
-        );
-
-        // Temp and staged APKs
-        assert_eq!(
-            engine.classify_path(Path::new("/data/app-staging/session_123.apk")),
-            JunkType::TempApk
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/local/tmp/base.apk")),
-            JunkType::TempApk
-        );
-        assert_eq!(
-            engine.classify_path(Path::new("/data/local/tmp/split.dex")),
-            JunkType::TempApk
-        );
+        let validated_old = safety.validate_candidate(old_candidate, &descriptor).unwrap();
+        let decision_old = policy.evaluate_candidate(validated_old, &descriptor, &eff_cfg, now);
+        assert!(matches!(
+            decision_old,
+            PolicyDecision::Allow(permit) if permit.reason == DecisionReason::ExceedsRetentionAge
+        ));
     }
 
     #[test]
@@ -262,4 +174,3 @@ mod tests {
         }
     }
 }
-

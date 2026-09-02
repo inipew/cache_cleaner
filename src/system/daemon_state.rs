@@ -307,8 +307,8 @@ impl DaemonContext {
                 };
 
                 log::info!("Starting background automatic maintenance cycle...");
-                let report = {
-                    let engine = clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let report_res = {
+                    let mut engine = clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     engine.execute(&params, &cancel_token)
                 };
 
@@ -317,24 +317,30 @@ impl DaemonContext {
                     .unwrap_or_default()
                     .as_secs();
 
-                {
+                if let Ok(report) = report_res {
+                    {
+                        let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        rt.last_cleaned_ts = Some(now_ts);
+                        rt.last_freed_bytes = report.storage.total_freed_bytes;
+                        rt.total_freed_bytes += report.storage.total_freed_bytes;
+                        rt.state = DaemonState::Idle;
+                        rt.is_cleaning = false;
+                    }
+
+                    // Immediately release all heap memory back to kernel
+                    crate::util::trim_heap_memory();
+
+                    log::info!(
+                        "Automatic maintenance finished: {} freed in {} ms",
+                        report.storage.total_freed_bytes,
+                        report.duration_ms
+                    );
+                } else if let Err(e) = report_res {
+                    log::warn!("Automatic maintenance failed: {}", e);
                     let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    rt.last_cleaned_ts = Some(now_ts);
-                    rt.last_freed_bytes = report.total_freed_bytes;
-                    rt.total_freed_bytes += report.total_freed_bytes;
                     rt.state = DaemonState::Idle;
                     rt.is_cleaning = false;
                 }
-
-                // Immediately release all heap memory back to kernel
-                crate::util::trim_heap_memory();
-
-                log::info!(
-                    "Automatic maintenance finished: {} freed across {} files in {} ms",
-                    report.total_freed_bytes,
-                    report.deleted_files_count,
-                    report.duration_ms
-                );
             });
     }
 
@@ -495,8 +501,8 @@ impl DaemonContext {
                     .name("ipc-triggered-clean".to_string())
                     .stack_size(256 * 1024)
                     .spawn(move || {
-                        let report = {
-                            let engine = clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let report_res = {
+                            let mut engine = clean_engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             engine.execute(&params, &cancel_token)
                         };
 
@@ -505,23 +511,30 @@ impl DaemonContext {
                             .unwrap_or_default()
                             .as_secs();
 
-                        {
+                        if let Ok(report) = report_res {
+                            {
+                                let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                rt.last_cleaned_ts = Some(now_ts);
+                                rt.last_freed_bytes = report.storage.total_freed_bytes;
+                                rt.total_freed_bytes += report.storage.total_freed_bytes;
+                                rt.state = DaemonState::Idle;
+                                rt.is_cleaning = false;
+                            }
+
+                            // Immediately release all heap memory back to kernel
+                            crate::util::trim_heap_memory();
+
+                            log::info!(
+                                "Manual clean completed via IPC. Freed: {} in {} ms",
+                                report.storage.total_freed_bytes,
+                                report.duration_ms
+                            );
+                        } else if let Err(e) = report_res {
+                            log::warn!("Manual clean failed via IPC: {}", e);
                             let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-                            rt.last_cleaned_ts = Some(now_ts);
-                            rt.last_freed_bytes = report.total_freed_bytes;
-                            rt.total_freed_bytes += report.total_freed_bytes;
                             rt.state = DaemonState::Idle;
                             rt.is_cleaning = false;
                         }
-
-                        // Immediately release all heap memory back to kernel
-                        crate::util::trim_heap_memory();
-
-                        log::info!(
-                            "Manual clean completed via IPC. Freed: {} across {} files",
-                            report.total_freed_bytes,
-                            report.deleted_files_count
-                        );
                     });
 
                 Response::Success(ResponseData::Message(
