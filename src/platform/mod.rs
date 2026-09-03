@@ -1,10 +1,15 @@
 pub mod android_prop;
 pub mod encryption;
+pub mod privilege;
 pub mod selinux;
 pub mod users;
 
 pub use android_prop::AndroidSystemInfo;
 pub use encryption::{check_encryption_state, EncryptionState, StorageState};
+pub use privilege::{
+    APatchPlatform, CallerIdentity, KernelSUPlatform, MagiskPlatform, PlatformCapabilities,
+    PrivilegePlatform,
+};
 pub use selinux::{get_selinux_mode, SelinuxMode};
 pub use users::{enumerate_users, AndroidUser};
 
