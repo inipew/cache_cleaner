@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use serde::{Deserialize, Serialize};
 
 use crate::domain::candidate::Candidate;
 use crate::domain::target::TargetDescriptor;
@@ -8,7 +9,46 @@ use crate::fs::SafeDirHandle;
 use crate::resource::ResourceManager;
 
 pub const DEFAULT_SCAN_CHUNK_SIZE: usize = 500;
-pub const MAX_CANDIDATES_PER_TARGET: usize = 100_000;
+pub const MAX_CANDIDATES_PER_TARGET: usize = 50_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScanStatus {
+    Complete,
+    Partial,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    pub candidates: Vec<Candidate>,
+    pub status: ScanStatus,
+    pub errors: Vec<String>,
+}
+
+impl ScanResult {
+    pub fn new(candidates: Vec<Candidate>, status: ScanStatus, errors: Vec<String>) -> Self {
+        Self {
+            candidates,
+            status,
+            errors,
+        }
+    }
+}
+
+impl std::ops::Deref for ScanResult {
+    type Target = [Candidate];
+    fn deref(&self) -> &Self::Target {
+        &self.candidates
+    }
+}
+
+impl IntoIterator for ScanResult {
+    type Item = Candidate;
+    type IntoIter = std::vec::IntoIter<Candidate>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.candidates.into_iter()
+    }
+}
 
 /// Candidate Scanner discovering files and sub-directories within registered targets.
 /// Traverses filesystem FD-relatively using `SafeDirHandle` and `RawDir`, enforcing resource permits and backpressure.
@@ -35,35 +75,56 @@ impl CandidateScanner {
     }
 
     /// Scans a target descriptor recursively and collects candidates into memory using SafeDirHandle.
-    pub fn scan_target(&self, target: &TargetDescriptor) -> Result<Vec<Candidate>> {
+    pub fn scan_target(&self, target: &TargetDescriptor) -> Result<ScanResult> {
         let default_res = ResourceManager::default();
         self.scan_target_with_resource(target, &default_res)
     }
 
-    /// Scans a target descriptor with explicit ResourceManager governor.
+    /// Scans a target descriptor with explicit ResourceManager governor and error tracking.
     pub fn scan_target_with_resource(
         &self,
         target: &TargetDescriptor,
         resource_mgr: &ResourceManager,
-    ) -> Result<Vec<Candidate>> {
+    ) -> Result<ScanResult> {
         let mut candidates = Vec::new();
+        let mut errors = Vec::new();
         let root_permit = resource_mgr.acquire_fd_permit().ok();
+
         let root_handle = match SafeDirHandle::open_root_with_permit(&target.base_path, root_permit) {
             Ok(h) => h,
-            Err(_) => return Ok(candidates),
+            Err(e) => {
+                if !target.base_path.exists() {
+                    return Ok(ScanResult::new(candidates, ScanStatus::Complete, errors));
+                }
+                errors.push(format!("Failed to open target root {}: {}", target.base_path.display(), e));
+                return Ok(ScanResult::new(candidates, ScanStatus::Failed, errors));
+            }
         };
 
+        let mut hit_limit = false;
         self.scan_safe_recursive(
             target,
             &root_handle,
             &RelativePath::empty(),
             resource_mgr,
             &mut candidates,
+            &mut errors,
+            &mut hit_limit,
             0,
             16,
         )?;
 
-        Ok(candidates)
+        let status = if hit_limit {
+            ScanStatus::Partial
+        } else if !errors.is_empty() && candidates.is_empty() {
+            ScanStatus::Failed
+        } else if !errors.is_empty() {
+            ScanStatus::Partial
+        } else {
+            ScanStatus::Complete
+        };
+
+        Ok(ScanResult::new(candidates, status, errors))
     }
 
     /// Scans a target descriptor with chunked streaming, SafeDirHandle FD-safety, and resource governor permits.
@@ -112,20 +173,30 @@ impl CandidateScanner {
         rel_prefix: &RelativePath,
         resource_mgr: &ResourceManager,
         candidates: &mut Vec<Candidate>,
+        errors: &mut Vec<String>,
+        hit_limit: &mut bool,
         depth: usize,
         max_depth: usize,
     ) -> Result<()> {
-        if depth >= max_depth || candidates.len() >= MAX_CANDIDATES_PER_TARGET {
+        if depth >= max_depth {
+            return Ok(());
+        }
+        if candidates.len() >= MAX_CANDIDATES_PER_TARGET {
+            *hit_limit = true;
             return Ok(());
         }
 
         let entries = match current_handle.read_entries_fd() {
             Ok(e) => e,
-            Err(_) => return Ok(()),
+            Err(e) => {
+                errors.push(format!("Failed to read directory {}: {}", rel_prefix.as_str(), e));
+                return Ok(());
+            }
         };
 
         for entry in entries {
             if candidates.len() >= MAX_CANDIDATES_PER_TARGET {
+                *hit_limit = true;
                 break;
             }
 
@@ -157,6 +228,8 @@ impl CandidateScanner {
                             &entry_rel,
                             resource_mgr,
                             candidates,
+                            errors,
+                            hit_limit,
                             depth + 1,
                             max_depth,
                         )?;

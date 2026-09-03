@@ -58,13 +58,44 @@ pub struct TargetId(pub String);
 
 impl TargetId {
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let s = id.into();
+        if s.trim().is_empty() || s.len() > 512 || s.contains('\0') || s.contains('\n') {
+            panic!("TargetId must be non-empty, <=512, no NUL/newline");
+        }
+        Self(s)
+    }
+    pub fn try_new(id: impl Into<String>) -> Result<Self, &'static str> {
+        let s = id.into();
+        if s.trim().is_empty() || s.len() > 512 || s.contains('\0') {
+            return Err("invalid TargetId");
+        }
+        Ok(Self(s))
     }
 }
 
 impl fmt::Display for TargetId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "target:{}", self.0)
+    }
+}
+
+/// Identifies a locked or leased resource in the durability store.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ResourceId(pub String);
+
+impl ResourceId {
+    pub fn for_job(job_id: JobId) -> Self {
+        Self(format!("job:{}", job_id.0))
+    }
+
+    pub fn for_target(target_id: &TargetId) -> Self {
+        Self(format!("target:{}", target_id.0))
+    }
+}
+
+impl fmt::Display for ResourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -78,23 +109,46 @@ impl fmt::Display for CandidateId {
     }
 }
 
-/// Generation counter for Target Catalog and Configuration snapshots.
+/// Distinct generation counters — MUST NOT be interchanged.
 /// Enforces generation binding so that stale plans cannot execute against newer snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct GenerationId(pub u64);
+pub struct ConfigGeneration(pub u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CatalogGeneration(pub u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PlatformGeneration(pub u64);
 
-impl GenerationId {
-    pub const INITIAL: Self = Self(1);
+/// Backwards-compatible alias — new code MUST use ConfigGeneration/CatalogGeneration distinct types.
+pub type GenerationId = CatalogGeneration;
 
-    pub fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
-    }
+macro_rules! impl_generation {
+    ($name:ident) => {
+        impl $name {
+            pub const INITIAL: Self = Self(1);
+            pub fn next(self) -> Result<Self, &'static str> {
+                self.0
+                    .checked_add(1)
+                    .map(Self)
+                    .ok_or("generation overflow — must fail closed, not saturate")
+            }
+            pub fn next_saturating(self) -> Self {
+                Self(self.0.saturating_add(1))
+            }
+        }
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}-{}", stringify!($name), self.0)
+            }
+        }
+    };
 }
+impl_generation!(ConfigGeneration);
+impl_generation!(CatalogGeneration);
+impl_generation!(PlatformGeneration);
 
-impl fmt::Display for GenerationId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "gen-{}", self.0)
-    }
+// Keep GenerationId INITIAL for backwards compat
+impl GenerationId {
+    pub const INITIAL_CAT: Self = Self(1);
 }
 
 /// Unique identifier for an authorization capability grant.
@@ -113,13 +167,29 @@ pub struct ByteCount(pub u64);
 
 impl ByteCount {
     pub const ZERO: Self = Self(0);
+    pub const MAX_SAFE: Self = Self(10 * 1024 * 1024 * 1024); // 10 GiB hard bound per 65.md:79
 
     pub fn new(bytes: u64) -> Self {
+        assert!(bytes <= Self::MAX_SAFE.0, "ByteCount exceeds hard bound 10GiB");
         Self(bytes)
+    }
+    pub fn new_unchecked(bytes: u64) -> Self {
+        Self(bytes)
+    }
+
+    pub fn try_new(bytes: u64) -> Result<Self, &'static str> {
+        if bytes > Self::MAX_SAFE.0 {
+            return Err("ByteCount exceeds 10GiB hard bound");
+        }
+        Ok(Self(bytes))
     }
 
     pub fn as_u64(&self) -> u64 {
         self.0
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
     }
 
     pub fn saturating_add(self, other: Self) -> Self {
@@ -234,6 +304,12 @@ pub struct RelativePath(PathBuf);
 
 impl RelativePath {
     pub fn parse(path_str: &str) -> Option<Self> {
+        if path_str.is_empty() {
+            return Some(Self(PathBuf::new()));
+        }
+        if path_str.len() > 4096 {
+            return None;
+        }
         if path_str.chars().any(|c| c.is_control() || c == '\0') {
             return None;
         }
@@ -241,11 +317,23 @@ impl RelativePath {
         if path.is_absolute() {
             return None;
         }
+        let mut count = 0usize;
         for component in path.components() {
             match component {
-                std::path::Component::Normal(_) => {}
+                std::path::Component::Normal(os) => {
+                    if os.len() > 255 {
+                        return None;
+                    }
+                    count += 1;
+                    if count > 255 {
+                        return None;
+                    }
+                }
                 _ => return None, // Reject '.', '..', Prefix, RootDir
             }
+        }
+        if count == 0 {
+            return None;
         }
         Some(Self(path.to_path_buf()))
     }

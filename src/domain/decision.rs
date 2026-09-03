@@ -21,6 +21,8 @@ pub enum DecisionReason {
     TargetIsReadOnly,
     /// Exceeds job execution time or item budget
     BudgetExceeded,
+    /// Target category is disabled by configuration
+    CategoryDisabled,
     /// Custom configuration rule matched
     RuleMatch(String),
 }
@@ -35,6 +37,7 @@ impl fmt::Display for DecisionReason {
             Self::ProtectedBytecode => write!(f, "Protected bytecode/JIT artifact"),
             Self::TargetIsReadOnly => write!(f, "Target is read-only"),
             Self::BudgetExceeded => write!(f, "Execution budget exceeded"),
+            Self::CategoryDisabled => write!(f, "Target category is disabled by configuration"),
             Self::RuleMatch(rule) => write!(f, "Rule match: {}", rule),
         }
     }

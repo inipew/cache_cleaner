@@ -13,7 +13,7 @@ cd "$PROJECT_ROOT"
 TARGET="aarch64-linux-android"
 API_LEVEL="${API_LEVEL:-28}" # Default: Android 9 (API 28) for maximum compatibility (Android 9 - 16+)
 DIST_DIR="$PROJECT_ROOT/dist"
-BIN_NAME="cache-cleaner-daemon"
+BIN_NAME="cleaner"
 
 # Colors for terminal output
 BOLD='\033[1m'
@@ -135,7 +135,8 @@ if [ -z "$NDK_PATH" ]; then
     echo -e "Attempting to build with cargo-ndk if available..."
     if command -v cargo-ndk >/dev/null 2>&1; then
         echo -e "${GREEN}[+] Found cargo-ndk! Building with cargo-ndk...${NC}"
-        cargo ndk -t arm64-v8a --platform "$API_LEVEL" build --release
+        export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
+        cargo ndk -t arm64-v8a --platform "$API_LEVEL" build --release --bin "$BIN_NAME"
     else
         echo -e "${RED}[ERROR] Neither Android NDK nor cargo-ndk was found.${NC}"
         echo -e "Please install Android NDK (r25c+ recommended) or install cargo-ndk via:"
@@ -167,6 +168,7 @@ else
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/bin/aarch64-linux-android${API_LEVEL}-clang"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$TOOLCHAIN/bin/llvm-ar"
     export STRIP_TOOL="$TOOLCHAIN/bin/llvm-strip"
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
 
     echo -e "${BLUE}[*] Linker : ${CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER}${NC}"
 
@@ -174,14 +176,20 @@ else
     # 2. Compile via Cargo
     # --------------------------------------------------------------------------
     echo -e "${BLUE}[*] Compiling ${BIN_NAME} for ${TARGET} (Release)...${NC}"
-    cargo build --target "$TARGET" --release
+    cargo build --target "$TARGET" --release --bin "$BIN_NAME"
 fi
 
 TARGET_BIN="$PROJECT_ROOT/target/$TARGET/release/$BIN_NAME"
 
 if [ ! -f "$TARGET_BIN" ]; then
-    echo -e "${RED}[ERROR] Compiled binary not found at $TARGET_BIN${NC}"
-    exit 1
+    if [ -f "$PROJECT_ROOT/target/$TARGET/release/cleaner" ]; then
+        TARGET_BIN="$PROJECT_ROOT/target/$TARGET/release/cleaner"
+    elif [ -f "$PROJECT_ROOT/target/$TARGET/release/cache-cleaner-daemon" ]; then
+        TARGET_BIN="$PROJECT_ROOT/target/$TARGET/release/cache-cleaner-daemon"
+    else
+        echo -e "${RED}[ERROR] Compiled binary not found at $TARGET_BIN${NC}"
+        exit 1
+    fi
 fi
 
 # ------------------------------------------------------------------------------

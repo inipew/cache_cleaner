@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::domain::result::JobResult;
 use crate::domain::types::{JobId, UnixTimestamp};
 use crate::error::{CleanerError, Result};
+
+pub const MAX_AUDIT_LOG_SIZE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 
 /// Persistent structured audit record for a completed or failed cleanup job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,16 +51,20 @@ pub struct AuditLogger {
 }
 
 impl AuditLogger {
+    /// Opens or creates audit file enforcing 0600 permissions and O_NOFOLLOW (Spec 91.md).
     pub fn open_or_create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent).map_err(CleanerError::Io)?;
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
         }
 
-        let file = OpenOptions::new()
-            .create(true)
+        let mut opts = OpenOptions::new();
+        opts.create(true)
             .append(true)
-            .open(path)
-            .map_err(CleanerError::Io)?;
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600);
+
+        let file = opts.open(path).map_err(CleanerError::Io)?;
 
         Ok(Self {
             log_path: path.to_path_buf(),
@@ -69,25 +76,39 @@ impl AuditLogger {
         &self.log_path
     }
 
+    /// Primary production audit log path without unsafe world-writable fallback (Spec 91.md).
     pub fn default_logger() -> Result<Self> {
         let primary = Path::new("/data/adb/cleaner/audit/audit.jsonl");
-        if primary.parent().is_some_and(|p| p.exists()) {
-            Self::open_or_create(primary)
-        } else {
-            let local_dir = std::env::temp_dir().join("cleaner_audit");
-            let _ = fs::create_dir_all(&local_dir);
-            Self::open_or_create(&local_dir.join("audit.jsonl"))
-        }
+        Self::open_or_create(primary)
     }
 
-    /// Records a completed JobResult into the persistent audit trail.
+    /// Records a completed JobResult into the persistent audit trail with fsync durability.
     pub fn record_job(&self, result: &JobResult) -> Result<()> {
         let record = JobAuditRecord::from(result);
         let mut guard = self.writer.lock().unwrap();
+
+        // 10MB Log Rotation (Spec 91.md)
+        if let Ok(meta) = fs::metadata(&self.log_path) {
+            if meta.len() >= MAX_AUDIT_LOG_SIZE_BYTES {
+                drop(guard.take());
+                let rotated = self.log_path.with_extension("jsonl.1");
+                let _ = fs::rename(&self.log_path, &rotated);
+
+                let mut opts = OpenOptions::new();
+                opts.create(true)
+                    .append(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .mode(0o600);
+                if let Ok(new_file) = opts.open(&self.log_path) {
+                    *guard = Some(new_file);
+                }
+            }
+        }
+
         if let Some(ref mut file) = *guard {
             let json_line = serde_json::to_string(&record)?;
             writeln!(file, "{}", json_line)?;
-            file.flush()?;
+            file.sync_all()?;
         }
         Ok(())
     }

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::domain::types::{
-    AttemptId, ByteCount, FileIdentity, GenerationId, JobId, OperationId, RelativePath, TargetId,
-    UnixTimestamp,
+    AttemptId, ByteCount, CatalogGeneration, ConfigGeneration, FileIdentity, JobId, OperationId,
+    RelativePath, TargetId, UnixTimestamp,
 };
 
 /// Type of filesystem mutation to be performed.
@@ -24,6 +24,28 @@ impl fmt::Display for MutationType {
     }
 }
 
+/// Explicit lifecycle state of a durable operation intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntentState {
+    Committed,
+    Mutating,
+    VerifiedSuccess,
+    VerifiedFailed,
+    ResolvedUnknown,
+}
+
+impl fmt::Display for IntentState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IntentState::Committed => write!(f, "COMMITTED"),
+            IntentState::Mutating => write!(f, "MUTATING"),
+            IntentState::VerifiedSuccess => write!(f, "VERIFIED_SUCCESS"),
+            IntentState::VerifiedFailed => write!(f, "VERIFIED_FAILED"),
+            IntentState::ResolvedUnknown => write!(f, "RESOLVED_UNKNOWN"),
+        }
+    }
+}
+
 /// Durable Operation Intent recorded and committed to the store BEFORE physical mutation.
 /// Guarantees exact idempotency, crash consistency, and post-crash reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,9 +59,11 @@ pub struct OperationIntent {
     pub expected_identity: FileIdentity,
     pub estimated_bytes: ByteCount,
     pub mutation_type: MutationType,
-    pub catalog_generation: GenerationId,
-    pub config_generation: GenerationId,
+    pub state: IntentState,
+    pub catalog_generation: CatalogGeneration,
+    pub config_generation: ConfigGeneration,
     pub committed_at: UnixTimestamp,
+    pub resolved_at: Option<UnixTimestamp>,
 }
 
 impl OperationIntent {
@@ -53,8 +77,8 @@ impl OperationIntent {
         expected_identity: FileIdentity,
         estimated_bytes: ByteCount,
         mutation_type: MutationType,
-        catalog_generation: GenerationId,
-        config_generation: GenerationId,
+        catalog_generation: CatalogGeneration,
+        config_generation: ConfigGeneration,
     ) -> Self {
         Self {
             intent_id: None,
@@ -66,9 +90,11 @@ impl OperationIntent {
             expected_identity,
             estimated_bytes,
             mutation_type,
+            state: IntentState::Committed,
             catalog_generation,
             config_generation,
             committed_at: UnixTimestamp::now(),
+            resolved_at: None,
         }
     }
 }

@@ -4,6 +4,7 @@ use std::io::Write;
 use cache_cleaner_daemon::auth::AuthorizationEngine;
 use cache_cleaner_daemon::catalog::TargetCatalog;
 use cache_cleaner_daemon::config_pipeline::{EffectiveConfig, RawConfig, ValidatedConfig};
+use cache_cleaner_daemon::domain::types::{CatalogGeneration, ConfigGeneration};
 use cache_cleaner_daemon::domain::*;
 use cache_cleaner_daemon::engine::cancellation::CancellationToken;
 use cache_cleaner_daemon::executor::CleanupExecutor;
@@ -99,7 +100,7 @@ fn test_end_to_end_pipeline_execution_and_verification() {
         min_app_cache_age_days: Some(0), // Allow immediate cleaning for test
         ..Default::default()
     }).unwrap();
-    let eff_cfg = EffectiveConfig::new(snapshot.generation, val_cfg);
+    let eff_cfg = EffectiveConfig::new(ConfigGeneration::INITIAL, val_cfg);
 
     let policy = PolicyEngine::new();
     let mut permits = Vec::new();
@@ -114,20 +115,22 @@ fn test_end_to_end_pipeline_execution_and_verification() {
 
     // 6. Planner Operation DAG Generation
     let planner = CleanupPlanner::new();
-    let planned_plan = planner.build_plan(JobId(42), snapshot.generation, permits);
+    let planned_plan = planner
+        .build_plan(JobId(42), snapshot.generation, ConfigGeneration(1), permits)
+        .expect("Planning should succeed");
     assert!(!planned_plan.is_empty());
     assert_eq!(planned_plan.operations.len(), 3);
 
     // 7. Authorization Capability Grant
     let auth = AuthorizationEngine::new();
     let authorized_plan = auth
-        .authorize_plan(planned_plan.clone(), snapshot.generation, 300, GenerationId(1))
+        .authorize_plan(planned_plan.clone(), snapshot.generation, 300, ConfigGeneration(1))
         .expect("Authorization should succeed");
-    assert!(authorized_plan.is_authorized_for_execution(now, snapshot.generation));
+    assert!(authorized_plan.is_authorized_for_execution(now, snapshot.generation, ConfigGeneration(1)));
 
     // Stale generation authorization rejection test
-    let stale_gen = GenerationId(999);
-    assert!(auth.authorize_plan(planned_plan.clone(), stale_gen, 300, GenerationId(1)).is_err());
+    let stale_gen = CatalogGeneration(999);
+    assert!(auth.authorize_plan(planned_plan.clone(), stale_gen, 300, ConfigGeneration(1)).is_err());
 
     // 8. Executor Single Mutation Execution
     let executor = CleanupExecutor::new();
@@ -135,15 +138,19 @@ fn test_end_to_end_pipeline_execution_and_verification() {
     let resource_mgr = cache_cleaner_daemon::resource::ResourceManager::default();
     let verifier = PostconditionVerifier::new();
     let safety_gate = SafetyGate::new();
+    let store = cache_cleaner_daemon::store::SqliteStore::in_memory().unwrap();
+    store.register_job(JobId(42), "TEST", snapshot.generation, ConfigGeneration(1)).unwrap();
+    store.create_attempt(AttemptId(1), JobId(42), cache_cleaner_daemon::domain::WorkerId(1), 60).unwrap();
 
     let job_result = executor
         .execute_plan(
             &authorized_plan,
             &snapshot,
+            ConfigGeneration(1),
             AttemptId(1),
             &cancel_token,
             &resource_mgr,
-            None,
+            &store,
             &safety_gate,
             &verifier,
         )
@@ -161,4 +168,49 @@ fn test_end_to_end_pipeline_execution_and_verification() {
 
     // Clean up test sandbox
     let _ = fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn test_planner_operation_budget_capping() {
+    use cache_cleaner_daemon::domain::candidate::{Candidate, SafetyValidatedCandidate};
+    use cache_cleaner_daemon::domain::decision::{DecisionReason, PolicyPermit};
+    use cache_cleaner_daemon::domain::types::{
+        CandidateId, FileIdentity, RelativePath, TargetId, UnixTimestamp,
+    };
+    use cache_cleaner_daemon::planner::CleanupPlanner;
+
+    let planner = CleanupPlanner::new();
+    let mut permits = Vec::new();
+    let target_id = TargetId::new("test:target");
+
+    // Create more permits than the budget
+    for i in 0..12_000 {
+        let rel_name = format!("file_{}.tmp", i);
+        let cand = Candidate {
+            candidate_id: CandidateId(i),
+            target_id: target_id.clone(),
+            rel_path: RelativePath::parse(&rel_name).unwrap(),
+            identity: FileIdentity::new(1, i + 100),
+            size_bytes: ByteCount::new(10),
+            mtime: UnixTimestamp(100),
+            atime: None,
+            is_dir: false,
+            is_symlink: false,
+        };
+        permits.push(PolicyPermit {
+            candidate: SafetyValidatedCandidate {
+                candidate: cand,
+                trusted_root_dev: cache_cleaner_daemon::domain::types::DeviceNumber(1),
+                trusted_root_ino: cache_cleaner_daemon::domain::types::InodeNumber(1),
+                validated_at: UnixTimestamp::now(),
+            },
+            priority: 100,
+            reason: DecisionReason::ExceedsRetentionAge,
+            decided_at: UnixTimestamp::now(),
+        });
+    }
+
+    let res = planner.build_plan(JobId(1), CatalogGeneration(1), ConfigGeneration(1), permits);
+    // Invariant: The plan MUST fail closed if over budget (Spec 72.md)
+    assert!(res.is_err());
 }

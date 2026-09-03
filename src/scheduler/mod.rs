@@ -2,11 +2,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::types::{GenerationId, JobId, UnixTimestamp};
+use crate::domain::types::{CatalogGeneration, ConfigGeneration, JobId, UnixTimestamp};
 use crate::error::{CleanerError, Result};
 use crate::store::SqliteStore;
 
-pub const MAX_QUEUED_JOBS: usize = 32;
+pub const MAX_QUEUED_JOBS: usize = 1;
 
 /// Trigger source initiating a cleanup evaluation or job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,8 +26,8 @@ pub struct JobAdmissionRequest {
     pub deep: bool,
     pub trim: bool,
     pub dry_run: bool,
-    pub catalog_generation: GenerationId,
-    pub config_generation: GenerationId,
+    pub catalog_generation: CatalogGeneration,
+    pub config_generation: ConfigGeneration,
     pub admitted_at: UnixTimestamp,
 }
 
@@ -49,25 +49,30 @@ impl SchedulerService {
         }
     }
 
-    /// Admits a new job request into the scheduler queue, enforcing bounds and registering it in SQLite.
+    /// Admits a new job request into the scheduler queue, enforcing single-slot queue with coalescing (Spec 84.md:6).
     pub fn admit_job(
         &self,
         source: TriggerSource,
         deep: bool,
         trim: bool,
         dry_run: bool,
-        catalog_gen: GenerationId,
-        config_gen: GenerationId,
+        catalog_gen: CatalogGeneration,
+        config_gen: ConfigGeneration,
     ) -> Result<JobAdmissionRequest> {
         let mut queue = self.queue.lock().map_err(|_| {
             CleanerError::Internal("Scheduler queue lock poisoned".into())
         })?;
 
-        if queue.len() >= MAX_QUEUED_JOBS {
-            return Err(CleanerError::ResourceExhausted(format!(
-                "Scheduler queue full ({} items)",
-                MAX_QUEUED_JOBS
-            )));
+        // Invariant: Trigger Coalescing (Spec 84.md:6)
+        if let Some(existing) = queue.front_mut() {
+            existing.deep = existing.deep || deep;
+            existing.trim = existing.trim || trim;
+            existing.dry_run = existing.dry_run && dry_run;
+            log::info!(
+                "Coalesced trigger {:?} into existing queued job {} (deep={}, trim={})",
+                source, existing.job_id, existing.deep, existing.trim
+            );
+            return Ok(existing.clone());
         }
 
         let job_id = {
@@ -98,9 +103,11 @@ impl SchedulerService {
     }
 
     /// Pops the next admitted job request for execution.
-    pub fn pop_next_job(&self) -> Option<JobAdmissionRequest> {
-        let mut queue = self.queue.lock().ok()?;
-        queue.pop_front()
+    pub fn pop_next_job(&self) -> Result<Option<JobAdmissionRequest>> {
+        let mut queue = self.queue.lock().map_err(|_| {
+            CleanerError::Internal("Scheduler queue lock poisoned".into())
+        })?;
+        Ok(queue.pop_front())
     }
 
     pub fn queued_count(&self) -> usize {

@@ -37,6 +37,39 @@ impl PolicyEngine {
     ) -> PolicyDecision {
         let decided_at = UnixTimestamp::now();
 
+        // Rule 0: Target Category Check
+        match target.target_class {
+            crate::domain::target::TargetClass::Tombstones if !config.validated.clean_tombstones => {
+                return PolicyDecision::Deny(PolicyDeny {
+                    candidate: validated,
+                    reason: DecisionReason::CategoryDisabled,
+                    decided_at,
+                });
+            }
+            crate::domain::target::TargetClass::LogArchive if !config.validated.clean_oem_logs => {
+                return PolicyDecision::Deny(PolicyDeny {
+                    candidate: validated,
+                    reason: DecisionReason::CategoryDisabled,
+                    decided_at,
+                });
+            }
+            crate::domain::target::TargetClass::TempDir if !config.validated.clean_temp_apks => {
+                return PolicyDecision::Deny(PolicyDeny {
+                    candidate: validated,
+                    reason: DecisionReason::CategoryDisabled,
+                    decided_at,
+                });
+            }
+            crate::domain::target::TargetClass::CodeCache if !config.validated.clean_code_cache => {
+                return PolicyDecision::Deny(PolicyDeny {
+                    candidate: validated,
+                    reason: DecisionReason::CategoryDisabled,
+                    decided_at,
+                });
+            }
+            _ => {}
+        }
+
         // Rule 1: Package Whitelist Check
         if let Some(ref pkg) = target.package_name {
             if config.is_package_whitelisted(pkg) {
@@ -63,14 +96,18 @@ impl PolicyEngine {
             });
         }
 
-        // Rule 3: Age Retention Threshold Check
-        let age_secs = validated.candidate.mtime.age_secs(now);
-        if age_secs < config.validated.min_app_cache_age_secs {
-            return PolicyDecision::Deny(PolicyDeny {
-                candidate: validated,
-                reason: DecisionReason::WithinRetentionGracePeriod,
-                decided_at,
-            });
+        // Rule 3: Age Retention Threshold Check (Applies strictly to files, not directories)
+        // CRITICAL INVARIANT: Directory candidates are planned as DeleteDirEmpty in the DAG
+        // after children are removed, and must not be rejected based on file creation mtime.
+        if !validated.candidate.is_dir {
+            let age_secs = validated.candidate.mtime.age_secs(now);
+            if age_secs < config.validated.min_app_cache_age_secs {
+                return PolicyDecision::Deny(PolicyDeny {
+                    candidate: validated,
+                    reason: DecisionReason::WithinRetentionGracePeriod,
+                    decided_at,
+                });
+            }
         }
 
         // Rule passed: Allow candidate for planning (Frozen apps get priority 200, active get 100)

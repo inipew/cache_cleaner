@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +13,16 @@ use crate::hardware::{
 };
 use crate::ipc::protocol::{CleanParams, Command, DaemonStatus, Response, ResponseData};
 use crate::system::idle::ThermalHysteresisState;
+
+/// Representation of an asynchronous clean job execution status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRecord {
+    pub job_id: u64,
+    pub state: String,
+    pub reclaimed_bytes: u64,
+    pub is_completed: bool,
+    pub report: Option<crate::ipc::protocol::CleanReport>,
+}
 
 /// Formal state machine representation of the cleaner daemon lifecycle
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +90,8 @@ pub struct DaemonContext {
     pub clean_engine: Arc<Mutex<CleanEngine>>,
     pub cancel_token: CancellationToken,
     pub runtime: Arc<RwLock<DaemonRuntimeState>>,
+    pub recent_jobs: Arc<RwLock<HashMap<u64, JobRecord>>>,
+    pub next_job_id: Arc<AtomicU64>,
     pub start_time: Instant,
 }
 
@@ -92,6 +106,8 @@ impl DaemonContext {
             clean_engine,
             cancel_token,
             runtime: Arc::new(RwLock::new(DaemonRuntimeState::default())),
+            recent_jobs: Arc::new(RwLock::new(HashMap::new())),
+            next_job_id: Arc::new(AtomicU64::new(1)),
             start_time: Instant::now(),
         }
     }
@@ -484,21 +500,36 @@ impl DaemonContext {
 
                 self.cancel_token.reset();
 
+                let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst);
+                {
+                    let mut jobs = self.recent_jobs.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    jobs.insert(
+                        job_id,
+                        JobRecord {
+                            job_id,
+                            state: "RUNNING".to_string(),
+                            reclaimed_bytes: 0,
+                            is_completed: false,
+                            report: None,
+                        },
+                    );
+                }
+
                 log::info!(
-                    "Spawning manual clean job via IPC (deep: {}, trim: {}, zram: {})...",
+                    "Spawning manual clean job #{} via IPC (deep: {}, trim: {}, zram: {})...",
+                    job_id,
                     params.deep,
                     params.trim,
                     params.zram_compact
                 );
 
-                // Spawn a dedicated thread to avoid blocking the IPC worker for the
-                // entire duration of the clean (which can take 30s–several minutes).
                 let clean_engine = self.clean_engine.clone();
                 let cancel_token = self.cancel_token.clone();
                 let runtime = self.runtime.clone();
+                let recent_jobs = self.recent_jobs.clone();
 
                 let _ = std::thread::Builder::new()
-                    .name("ipc-triggered-clean".to_string())
+                    .name(format!("ipc-clean-{}", job_id))
                     .stack_size(256 * 1024)
                     .spawn(move || {
                         let report_res = {
@@ -521,25 +552,61 @@ impl DaemonContext {
                                 rt.is_cleaning = false;
                             }
 
+                            {
+                                let mut jobs = recent_jobs.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if let Some(rec) = jobs.get_mut(&job_id) {
+                                    rec.state = "COMPLETED".to_string();
+                                    rec.reclaimed_bytes = report.storage.total_freed_bytes;
+                                    rec.is_completed = true;
+                                    rec.report = Some(report.clone());
+                                }
+                            }
+
                             // Immediately release all heap memory back to kernel
                             crate::util::trim_heap_memory();
 
                             log::info!(
-                                "Manual clean completed via IPC. Freed: {} in {} ms",
+                                "Manual clean job #{} completed via IPC. Freed: {} in {} ms",
+                                job_id,
                                 report.storage.total_freed_bytes,
                                 report.duration_ms
                             );
                         } else if let Err(e) = report_res {
-                            log::warn!("Manual clean failed via IPC: {}", e);
-                            let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-                            rt.state = DaemonState::Idle;
-                            rt.is_cleaning = false;
+                            log::warn!("Manual clean job #{} failed via IPC: {}", job_id, e);
+                            {
+                                let mut rt = runtime.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                rt.state = DaemonState::Idle;
+                                rt.is_cleaning = false;
+                            }
+                            {
+                                let mut jobs = recent_jobs.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if let Some(rec) = jobs.get_mut(&job_id) {
+                                    rec.state = format!("FAILED: {}", e);
+                                    rec.is_completed = true;
+                                    rec.report = None;
+                                }
+                            }
                         }
                     });
 
-                Response::Success(ResponseData::Message(
-                    "Manual clean started".to_string(),
-                ))
+                Response::Success(ResponseData::JobAccepted {
+                    job_id,
+                    message: format!("Manual clean job #{} accepted and executing in background", job_id),
+                })
+            }
+            Command::GetJobStatus(job_id) => {
+                let jobs = self.recent_jobs.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(rec) = jobs.get(&job_id) {
+                    Response::Success(ResponseData::JobStatus {
+                        job_id,
+                        state: rec.state.clone(),
+                        reclaimed_bytes: rec.reclaimed_bytes,
+                        is_completed: rec.is_completed,
+                        report: rec.report.clone(),
+                    })
+                } else {
+                    Response::Error(format!("Job #{} not found", job_id))
+                }
             }
             Command::GetStats => {
                 let metrics = crate::system::proc_metrics::get_process_metrics();

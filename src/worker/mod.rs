@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::domain::types::{AttemptId, JobId, WorkerId};
+use crate::domain::types::{AttemptId, JobId, ResourceId, WorkerId};
 use crate::error::{CleanerError, Result};
 use crate::store::SqliteStore;
 
@@ -31,8 +31,8 @@ impl WorkerPool {
         let attempt_num = self.attempt_counter.fetch_add(1, Ordering::SeqCst);
         let attempt_id = AttemptId(attempt_num);
 
-        let lease_resource = format!("job-attempt-{}", job_id.0);
-        let acquired = self.store.acquire_lease(&lease_resource, self.worker_id, lease_duration.as_secs())?;
+        let lease_resource = ResourceId::for_job(job_id);
+        let acquired = self.store.acquire_lease(&lease_resource.0, self.worker_id, lease_duration.as_secs())?;
         if !acquired {
             return Err(CleanerError::SafetyViolation(format!(
                 "Failed to acquire execution lease for job {}: already claimed by another worker",
@@ -41,6 +41,7 @@ impl WorkerPool {
         }
 
         self.store.create_attempt(attempt_id, job_id, self.worker_id, lease_duration.as_secs())?;
+        self.is_running.store(true, Ordering::SeqCst);
         log::info!("Worker {} claimed attempt {} for job {}", self.worker_id, attempt_id, job_id);
 
         Ok(attempt_id)
@@ -49,8 +50,9 @@ impl WorkerPool {
     /// Finalizes an execution attempt in SQLite.
     pub fn finish_attempt(&self, attempt_id: AttemptId, job_id: JobId, state: &str) -> Result<()> {
         self.store.update_attempt_state(attempt_id, state)?;
-        let lease_resource = format!("job-attempt-{}", job_id.0);
-        let _ = self.store.release_lease(&lease_resource, self.worker_id);
+        let lease_resource = ResourceId::for_job(job_id);
+        let _ = self.store.release_lease(&lease_resource.0, self.worker_id);
+        self.is_running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -59,6 +61,6 @@ impl WorkerPool {
     }
 
     pub fn is_running(&self) -> bool {
-        self.is_running.load(Ordering::Relaxed)
+        self.is_running.load(Ordering::SeqCst)
     }
 }

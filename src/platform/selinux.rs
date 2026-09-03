@@ -33,15 +33,3 @@ pub fn get_selinux_mode() -> SelinuxMode {
 
     SelinuxMode::Unknown
 }
-
-#[allow(dead_code)]
-pub fn is_root() -> bool {
-    #[cfg(unix)]
-    {
-        rustix::process::getuid().is_root()
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}

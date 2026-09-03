@@ -4,7 +4,7 @@ mod tests {
     use cache_cleaner_daemon::catalog::TargetCatalog;
     use cache_cleaner_daemon::config_pipeline::{EffectiveConfig, RawConfig, ValidatedConfig};
     use cache_cleaner_daemon::domain::decision::PolicyDecision;
-    use cache_cleaner_daemon::domain::types::{AttemptId, GenerationId, JobId, UnixTimestamp};
+    use cache_cleaner_daemon::domain::types::{AttemptId, CatalogGeneration, ConfigGeneration, JobId, UnixTimestamp};
     use cache_cleaner_daemon::engine::cancellation::CancellationToken;
     use cache_cleaner_daemon::executor::CleanupExecutor;
     use cache_cleaner_daemon::planner::CleanupPlanner;
@@ -107,7 +107,7 @@ mod tests {
             min_app_cache_age_days: Some(0),
             ..Default::default()
         }).unwrap();
-        let eff_cfg = EffectiveConfig::new(snapshot.generation, val_cfg);
+        let eff_cfg = EffectiveConfig::new(ConfigGeneration::INITIAL, val_cfg);
         let now = UnixTimestamp::now();
 
         let mut permits = Vec::new();
@@ -121,24 +121,28 @@ mod tests {
 
         // 4. Planner & Auth
         let planner = CleanupPlanner::new();
-        let planned = planner.build_plan(JobId(1), snapshot.generation, permits);
+        let planned = planner.build_plan(JobId(1), snapshot.generation, ConfigGeneration(1), permits).unwrap();
         let auth = AuthorizationEngine::new();
-        let authorized = auth.authorize_plan(planned.clone(), snapshot.generation, 300, GenerationId(1)).unwrap();
+        let authorized = auth.authorize_plan(planned.clone(), snapshot.generation, 300, ConfigGeneration(1)).unwrap();
 
         // 5. Executor & Verifier
         let executor = CleanupExecutor::new();
         let cancel_token = CancellationToken::new();
         let resource_mgr = cache_cleaner_daemon::resource::ResourceManager::default();
         let verifier = PostconditionVerifier::new();
+        let store = cache_cleaner_daemon::store::SqliteStore::in_memory().unwrap();
+        store.register_job(JobId(1), "TEST", snapshot.generation, ConfigGeneration(1)).unwrap();
+        store.create_attempt(AttemptId(1), JobId(1), cache_cleaner_daemon::domain::WorkerId(1), 60).unwrap();
         let safety_gate = SafetyGate::new();
 
         let result = executor.execute_plan(
-            &authorized,
-            &snapshot,
+        &authorized,
+        &snapshot,
+        ConfigGeneration(1),
             AttemptId(1),
             &cancel_token,
             &resource_mgr,
-            None,
+            &store,
             &safety_gate,
             &verifier,
         ).unwrap();

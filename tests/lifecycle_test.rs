@@ -6,6 +6,9 @@ mod tests {
     fn test_pid_lock_acquisition_and_mutual_exclusion() {
         let lock1 = PidLock::acquire();
         assert!(lock1.is_ok(), "First PID lock acquisition should succeed");
+        let l1 = lock1.as_ref().unwrap();
+        assert!(!l1.path().as_os_str().is_empty());
+        assert!(!l1.lock_path().as_os_str().is_empty());
 
         let lock2 = PidLock::acquire();
         assert!(

@@ -10,19 +10,13 @@ use crate::fs::SafeDirHandle;
 /// Rich postcondition verification outcome classification for fine-grained correctness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VerificationOutcome {
-    /// Object is confirmed absent on physical storage (Operation Succeeded).
     ConfirmedDeleted,
-    /// Object was already absent (Idempotent Success).
     AlreadyGone,
-    /// Object is still present on physical storage with matching identity (Operation Failed).
     StillPresent,
-    /// An object exists at path, but identity (dev/ino) does not match (TOCTOU/Replaced).
     IdentityMismatch,
-    /// Parent directory is unmounted, removed, or inaccessible.
     ParentUnavailable,
-    /// Target descriptor is missing or unmounted.
     TargetUnavailable,
-    /// Unknown storage state due to I/O or permissions error.
+    Stale,
     Unknown,
 }
 
@@ -65,9 +59,17 @@ impl PostconditionVerifier {
                 Some(n) => n,
                 None => return VerificationOutcome::Unknown,
             };
-            current_dir = match current_dir.open_child_dir(name) {
+            current_dir = match current_dir.open_child_dir_errno(name) {
                 Ok(h) => h,
-                Err(_) => return VerificationOutcome::ConfirmedDeleted, // Parent dir gone -> item is deleted
+                Err(rustix::io::Errno::NOENT) => return VerificationOutcome::AlreadyGone,
+                Err(rustix::io::Errno::ACCESS) | Err(rustix::io::Errno::PERM) => {
+                    return VerificationOutcome::ParentUnavailable;
+                }
+                Err(rustix::io::Errno::IO) | Err(rustix::io::Errno::STALE) => {
+                    return VerificationOutcome::Unknown;
+                }
+                Err(rustix::io::Errno::BUSY) | Err(rustix::io::Errno::ROFS) => return VerificationOutcome::TargetUnavailable,
+                Err(_) => return VerificationOutcome::ParentUnavailable,
             };
         }
 
@@ -76,7 +78,17 @@ impl PostconditionVerifier {
             None => return VerificationOutcome::Unknown,
         };
 
-        match current_dir.stat_child(leaf_name) {
+        self.verify_with_parent_handle(&current_dir, leaf_name, expected_identity)
+    }
+
+    /// Verifies postcondition using an active parent directory handle directly.
+    pub fn verify_with_parent_handle(
+        &self,
+        parent_dir: &SafeDirHandle,
+        leaf_name: &str,
+        expected_identity: &FileIdentity,
+    ) -> VerificationOutcome {
+        match parent_dir.stat_child_errno(leaf_name) {
             Ok(current_id) => {
                 if current_id == *expected_identity {
                     VerificationOutcome::StillPresent
@@ -84,16 +96,29 @@ impl PostconditionVerifier {
                     VerificationOutcome::IdentityMismatch
                 }
             }
-            Err(_) => VerificationOutcome::ConfirmedDeleted,
+            Err(rustix::io::Errno::NOENT) => VerificationOutcome::ConfirmedDeleted,
+            Err(rustix::io::Errno::ROFS) | Err(rustix::io::Errno::BUSY) => VerificationOutcome::TargetUnavailable,
+            Err(rustix::io::Errno::NOTDIR) | Err(rustix::io::Errno::STALE) => VerificationOutcome::ParentUnavailable,
+            Err(rustix::io::Errno::ACCESS) | Err(rustix::io::Errno::PERM) => VerificationOutcome::Unknown,
+            Err(rustix::io::Errno::IO) => VerificationOutcome::Unknown,
+            Err(_) => VerificationOutcome::Unknown,
         }
     }
 
     /// Verifies all operations in a plan, mapping each OperationId to its postcondition outcome.
+    /// Generation stale check per 43.md:22 — if plan generation mismatches catalog, return Stale for all.
     pub fn verify_plan_postcondition(
         &self,
         plan: &PlannedPlan,
         catalog: &CatalogSnapshot,
     ) -> HashMap<OperationId, VerificationOutcome> {
+        if plan.catalog_generation != catalog.generation {
+            let mut outcomes = HashMap::new();
+            for op in &plan.operations {
+                outcomes.insert(op.op_id, VerificationOutcome::Stale);
+            }
+            return outcomes;
+        }
         let mut outcomes = HashMap::new();
 
         for op in &plan.operations {

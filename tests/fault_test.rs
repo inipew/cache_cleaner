@@ -3,11 +3,13 @@ use std::path::PathBuf;
 
 use cache_cleaner_daemon::domain::intent::{MutationType, OperationIntent};
 use cache_cleaner_daemon::domain::types::{
-    ByteCount, DeviceNumber, FileIdentity, GenerationId, InodeNumber, JobId, OperationId,
+    ByteCount, DeviceNumber, FileIdentity, CatalogGeneration, ConfigGeneration, InodeNumber, JobId, OperationId,
     RelativePath, TargetId,
 };
+use cache_cleaner_daemon::fs::SafeDirHandle;
 use cache_cleaner_daemon::resource::ResourceManager;
 use cache_cleaner_daemon::store::SqliteStore;
+use cache_cleaner_daemon::verifier::{PostconditionVerifier, VerificationOutcome};
 
 struct TestSandbox {
     root: PathBuf,
@@ -24,6 +26,22 @@ impl TestSandbox {
 
 impl Drop for TestSandbox {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fn fix_perms(path: &std::path::Path) {
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o777));
+                            fix_perms(&p);
+                        }
+                    }
+                }
+            }
+            fix_perms(&self.root);
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
@@ -82,7 +100,7 @@ fn test_sqlite_store_durability_and_transactions() {
 
     let job_id = JobId(999);
     store
-        .register_job(job_id, "TEST", GenerationId::INITIAL, GenerationId::INITIAL)
+        .register_job(job_id, "TEST", CatalogGeneration::INITIAL, ConfigGeneration::INITIAL)
         .unwrap();
 
     let intent = OperationIntent::new(
@@ -97,8 +115,8 @@ fn test_sqlite_store_durability_and_transactions() {
         },
         ByteCount::new(10),
         MutationType::DeleteFile,
-        GenerationId::INITIAL,
-        GenerationId::INITIAL,
+        CatalogGeneration::INITIAL,
+        ConfigGeneration::INITIAL,
     );
 
     let row_id = store.commit_operation_intent(&intent).unwrap();
@@ -113,4 +131,58 @@ fn test_sqlite_store_durability_and_transactions() {
     assert_eq!(intents.len(), 1);
     assert_eq!(intents[0].job_id, job_id);
     assert_eq!(intents[0].rel_path.as_str(), "test.tmp");
+}
+
+#[test]
+fn test_postcondition_verifier_error_semantics() {
+    let sandbox = TestSandbox::new("verifier_semantics");
+    let base_dir = sandbox.root.join("cache_dir");
+    fs::create_dir_all(&base_dir).unwrap();
+
+    let verifier = PostconditionVerifier::new();
+
+    // 1. Existing file with exact identity -> StillPresent
+    let file1 = base_dir.join("present.tmp");
+    fs::write(&file1, b"hello").unwrap();
+    let handle = SafeDirHandle::open_root(&base_dir).unwrap();
+    let id1 = handle.stat_child("present.tmp").unwrap();
+
+    let outcome1 = verifier.verify_operation_postcondition(&base_dir, std::path::Path::new("present.tmp"), &id1);
+    assert_eq!(outcome1, VerificationOutcome::StillPresent);
+
+    // 2. Existing file with modified inode/identity -> IdentityMismatch
+    let mismatch_id = FileIdentity::new(id1.dev.0, id1.ino.0 + 9999);
+    let outcome_mismatch = verifier.verify_operation_postcondition(&base_dir, std::path::Path::new("present.tmp"), &mismatch_id);
+    assert_eq!(outcome_mismatch, VerificationOutcome::IdentityMismatch);
+
+    // 3. Genuine deleted file -> ConfirmedDeleted
+    fs::remove_file(&file1).unwrap();
+    let outcome_deleted = verifier.verify_operation_postcondition(&base_dir, std::path::Path::new("present.tmp"), &id1);
+    assert_eq!(outcome_deleted, VerificationOutcome::ConfirmedDeleted);
+
+    // 4. Inaccessible parent directory permissions -> ParentUnavailable (NEVER ConfirmedDeleted!)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let sub_dir = base_dir.join("locked_dir");
+        fs::create_dir_all(&sub_dir).unwrap();
+        let sub_file = sub_dir.join("inner.tmp");
+        fs::write(&sub_file, b"inner").unwrap();
+
+        // Strip search/read permissions from parent folder
+        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let outcome_inaccessible = verifier.verify_operation_postcondition(
+            &base_dir,
+            std::path::Path::new("locked_dir/inner.tmp"),
+            &id1,
+        );
+
+        // Verification MUST return ParentUnavailable, not ConfirmedDeleted!
+        assert_ne!(outcome_inaccessible, VerificationOutcome::ConfirmedDeleted);
+        assert_eq!(outcome_inaccessible, VerificationOutcome::ParentUnavailable);
+
+        // Restore permission for cleanup
+        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o777)).unwrap();
+    }
 }

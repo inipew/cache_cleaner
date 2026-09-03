@@ -215,8 +215,8 @@ pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
     use crate::domain::candidate::Candidate;
     use crate::domain::decision::PolicyDecision;
     use crate::domain::target::{TargetClass, TargetDescriptor, TargetSafetyTier};
-    use crate::domain::types::{
-        ByteCount, CandidateId, DeviceNumber, FileIdentity, GenerationId, InodeNumber,
+    use crate::domain::types::{CatalogGeneration, ConfigGeneration,
+        ByteCount, CandidateId, DeviceNumber, FileIdentity, InodeNumber,
         RelativePath, TargetId, UnixTimestamp,
     };
     use crate::policy::PolicyEngine;
@@ -248,6 +248,11 @@ pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
         min_app_cache_age_secs: (config.cleaning.min_file_age_hours as u64).saturating_mul(3600),
         app_cache_threshold_bytes: ByteCount::new(50 * 1024 * 1024),
         dry_run: false,
+        clean_app_cache: config.cleaning.clean_app_cache,
+        clean_code_cache: config.cleaning.clean_code_cache,
+        clean_tombstones: config.cleaning.clean_crash_dumps,
+        clean_oem_logs: config.cleaning.clean_oem_logs,
+        clean_temp_apks: config.cleaning.clean_temp_apks,
         whitelist_packages: config.safety.whitelist_packages.clone(),
         protected_paths: config
             .safety
@@ -258,7 +263,7 @@ pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
         fstrim_interval_secs: 86400,
         vacuum_db_interval_secs: 72 * 3600,
     };
-    let eff_cfg = EffectiveConfig::new(GenerationId::INITIAL, val_cfg);
+    let eff_cfg = EffectiveConfig::new(ConfigGeneration::INITIAL, val_cfg);
 
     let dev = meta.as_ref().map(|m| {
         #[cfg(unix)]
@@ -297,7 +302,7 @@ pub fn explain_path(config: &DaemonConfig, target_path: &Path) {
         owner_gid: 0,
         package_name: None,
         safety_tier: TargetSafetyTier::StandardCache,
-        catalog_generation: GenerationId::INITIAL,
+        catalog_generation: CatalogGeneration::INITIAL,
     };
 
     let candidate = Candidate {

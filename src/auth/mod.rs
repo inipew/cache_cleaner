@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::domain::grant::{AuthorizedPlan, Capability, CapabilityGrant};
 use crate::domain::plan::{OperationType, PlannedPlan};
-use crate::domain::types::{GenerationId, GrantId, UnixTimestamp};
+use crate::domain::types::{CatalogGeneration, ConfigGeneration, GrantId, UnixTimestamp};
 use crate::error::{CleanerError, Result};
 
 /// Authorization Engine issuing capability grants and enforcing generation binding.
@@ -32,15 +32,21 @@ impl AuthorizationEngine {
     pub fn authorize_plan(
         &self,
         plan: PlannedPlan,
-        current_catalog_gen: GenerationId,
+        current_catalog_gen: CatalogGeneration,
         ttl_secs: u64,
-        config_gen: GenerationId,
+        config_gen: ConfigGeneration,
     ) -> Result<AuthorizedPlan> {
         // Invariant: Generation binding check
         if plan.catalog_generation != current_catalog_gen {
             return Err(CleanerError::SafetyViolation(format!(
-                "Authorization rejected: plan generation {} is stale against catalog generation {}",
+                "Authorization rejected: plan catalog generation {} is stale against catalog generation {}",
                 plan.catalog_generation, current_catalog_gen
+            )));
+        }
+        if plan.config_generation != config_gen {
+            return Err(CleanerError::SafetyViolation(format!(
+                "Authorization rejected: plan config generation {} is stale against config generation {}",
+                plan.config_generation, config_gen
             )));
         }
 
@@ -73,8 +79,8 @@ impl AuthorizationEngine {
                 OperationType::TrimFilesystem { mount_path } => {
                     capabilities.push(Capability::TrimMount(mount_path.clone()));
                 }
-                OperationType::VacuumDatabase { .. } => {
-                    // Handled as internal maintenance
+                OperationType::VacuumDatabase { db_path } => {
+                    capabilities.push(Capability::VacuumDatabase(db_path.clone()));
                 }
             }
         }

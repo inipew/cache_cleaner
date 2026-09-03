@@ -29,6 +29,58 @@ pub fn execute_clean(
             );
         }
         match IpcClient::connect_and_send(&Command::TriggerClean(params)) {
+            Ok(Response::Success(ResponseData::JobAccepted { job_id, message })) => {
+                if !json {
+                    println!("[+] {}", message);
+                    println!("[*] Tracking progress for job #{}...", job_id);
+                }
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    match IpcClient::connect_and_send(&Command::GetJobStatus(job_id)) {
+                        Ok(Response::Success(ResponseData::JobStatus {
+                            is_completed,
+                            report,
+                            state,
+                            ..
+                        })) => {
+                            if is_completed {
+                                if let Some(rep) = report {
+                                    if json {
+                                        if let Ok(json_str) = serde_json::to_string_pretty(&rep) {
+                                            println!("{json_str}");
+                                        }
+                                    } else {
+                                        println!("[+] Clean job #{} completed via Daemon IPC:", job_id);
+                                        print_clean_report(&rep);
+                                    }
+                                } else if json {
+                                    println!("{{\"job_id\": {}, \"status\": \"{}\"}}", job_id, state);
+                                } else {
+                                    eprintln!("[!] Clean job #{} finished with state: {}", job_id, state);
+                                }
+                                break;
+                            }
+                        }
+                        Ok(Response::Error(err)) => {
+                            if json {
+                                println!("{{\"error\": \"{}\"}}", err);
+                            } else {
+                                eprintln!("[!] Error polling job #{}: {}", job_id, err);
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            if json {
+                                println!("{{\"error\": \"{}\"}}", e);
+                            } else {
+                                eprintln!("[!] Connection lost while polling job #{}: {}", job_id, e);
+                            }
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Ok(Response::Success(ResponseData::Report(report))) => {
                 if json {
                     if let Ok(json_str) = serde_json::to_string_pretty(&report) {
@@ -37,6 +89,13 @@ pub fn execute_clean(
                 } else {
                     println!("[+] Clean job executed via Daemon IPC:");
                     print_clean_report(&report);
+                }
+            }
+            Ok(Response::Success(ResponseData::Message(msg))) => {
+                if json {
+                    println!("{{\"message\": \"{}\"}}", msg);
+                } else {
+                    println!("[+] Daemon message: {}", msg);
                 }
             }
             Ok(Response::Error(msg)) => {

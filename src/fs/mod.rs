@@ -22,6 +22,46 @@ pub struct SafeDirEntry {
     pub mtime_secs: u64,
 }
 
+/// Validated, non-traversable trusted root path (Spec 70.md).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrustedRoot(std::path::PathBuf);
+
+impl TrustedRoot {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Result<Self> {
+        let p = path.into();
+        if !p.is_absolute() {
+            return Err(CleanerError::SafetyViolation(format!(
+                "TrustedRoot must be absolute: {}",
+                p.display()
+            )));
+        }
+        Ok(Self(p))
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TrustedRoot {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn validate_single_component(name: &str) -> std::result::Result<(), rustix::io::Errno> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\0')
+    {
+        Err(rustix::io::Errno::INVAL)
+    } else {
+        Ok(())
+    }
+}
+
 #[repr(C)]
 struct OpenHow {
     flags: u64,
@@ -91,53 +131,69 @@ impl SafeDirHandle {
         self.fd.as_raw_fd()
     }
 
-    /// Query metadata of a child without following symlinks.
-    pub fn stat_child(&self, child_name: &str) -> Result<FileIdentity> {
-        let st = statat(self.as_fd(), child_name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|e| CleanerError::Io(std::io::Error::from_raw_os_error(e.raw_os_error())))?;
-
+    /// Query metadata of a child returning raw Errno on failure.
+    pub fn stat_child_errno(&self, child_name: &str) -> std::result::Result<FileIdentity, rustix::io::Errno> {
+        validate_single_component(child_name)?;
+        let st = statat(self.as_fd(), child_name, AtFlags::SYMLINK_NOFOLLOW)?;
         Ok(FileIdentity::new(st.st_dev, st.st_ino))
     }
 
-    /// Safely open a sub-directory relative to this directory.
-    /// Uses openat2 probe with RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS if supported, falling back to openat + dev check.
-    pub fn open_child_dir(&self, child_name: &str) -> Result<Self> {
-        self.open_child_dir_with_permit(child_name, None)
+    /// Query metadata of a child without following symlinks.
+    pub fn stat_child(&self, child_name: &str) -> Result<FileIdentity> {
+        self.stat_child_errno(child_name)
+            .map_err(|e| CleanerError::Io(std::io::Error::from_raw_os_error(e.raw_os_error())))
     }
 
-    /// Safely open a sub-directory relative to this directory with an FD permit.
-    pub fn open_child_dir_with_permit(&self, child_name: &str, permit: Option<FdPermit>) -> Result<Self> {
-        let child_fd = self.try_openat2_child(child_name)
-            .or_else(|| self.openat_fallback(child_name))
-            .ok_or_else(|| CleanerError::SafetyViolation(format!("Failed to securely open child directory {}", child_name)))?;
+    /// Safely open a sub-directory relative to this directory returning raw Errno on failure.
+    pub fn open_child_dir_errno(&self, child_name: &str) -> std::result::Result<Self, rustix::io::Errno> {
+        validate_single_component(child_name)?;
+        let child_fd = match self.try_openat2_child(child_name)? {
+            Some(fd) => fd,
+            None => {
+                let oflags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+                openat(self.as_fd(), child_name, oflags, Mode::empty())?
+            }
+        };
 
-        let st = fstat(&child_fd)
-            .map_err(|e| CleanerError::Io(std::io::Error::from_raw_os_error(e.raw_os_error())))?;
-
+        let st = fstat(&child_fd)?;
         let child_dev = DeviceNumber(st.st_dev);
         if child_dev != self.dev {
-            return Err(CleanerError::SafetyViolation(format!(
-                "Anti-mount crossing violation: child directory {} has device {} != parent device {}",
-                child_name, child_dev, self.dev
-            )));
+            return Err(rustix::io::Errno::XDEV);
         }
 
         Ok(Self {
             fd: child_fd,
             dev: child_dev,
             ino: InodeNumber(st.st_ino),
-            _permit: permit,
+            _permit: None,
         })
     }
 
-    fn try_openat2_child(&self, child_name: &str) -> Option<OwnedFd> {
+    /// Safely open a sub-directory relative to this directory.
+    /// Uses openat2 probe with RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS if supported, falling back to openat + dev check.
+    pub fn open_child_dir(&self, child_name: &str) -> Result<Self> {
+        self.open_child_dir_errno(child_name)
+            .map_err(|e| CleanerError::Io(std::io::Error::from_raw_os_error(e.raw_os_error())))
+    }
+
+    /// Safely open a sub-directory relative to this directory with an FD permit.
+    pub fn open_child_dir_with_permit(&self, child_name: &str, permit: Option<FdPermit>) -> Result<Self> {
+        let mut handle = self.open_child_dir(child_name)?;
+        handle._permit = permit;
+        Ok(handle)
+    }
+
+    fn try_openat2_child(&self, child_name: &str) -> std::result::Result<Option<OwnedFd>, rustix::io::Errno> {
         if !OPENAT2_SUPPORTED.load(Ordering::Relaxed) {
-            return None;
+            return Ok(None);
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            let c_name = CString::new(child_name).ok()?;
+            let c_name = match CString::new(child_name) {
+                Ok(c) => c,
+                Err(_) => return Err(rustix::io::Errno::INVAL),
+            };
             let how = OpenHow {
                 flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64,
                 mode: 0,
@@ -156,21 +212,39 @@ impl SafeDirHandle {
 
             if res >= 0 {
                 use std::os::unix::io::FromRawFd;
-                return Some(unsafe { OwnedFd::from_raw_fd(res as i32) });
+                return Ok(Some(unsafe { OwnedFd::from_raw_fd(res as i32) }));
             }
 
             let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if err == libc::ENOSYS {
                 OPENAT2_SUPPORTED.store(false, Ordering::Relaxed);
+                return Ok(None);
             }
+
+            // Security & resolution errors MUST fail closed rather than falling back (Spec 70.md:47)
+            if err == libc::EINVAL {
+                return Err(rustix::io::Errno::INVAL);
+            }
+            if err == libc::EXDEV {
+                return Err(rustix::io::Errno::XDEV);
+            }
+            if err == libc::ELOOP {
+                return Err(rustix::io::Errno::LOOP);
+            }
+            if err == libc::EPERM || err == libc::EACCES {
+                return Err(rustix::io::Errno::ACCESS);
+            }
+            if err == libc::ENOENT {
+                return Err(rustix::io::Errno::NOENT);
+            }
+            Err(rustix::io::Errno::from_raw_os_error(err))
         }
-        None
+
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        Ok(None)
     }
 
-    fn openat_fallback(&self, child_name: &str) -> Option<OwnedFd> {
-        let oflags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-        openat(self.as_fd(), child_name, oflags, Mode::empty()).ok()
-    }
+
 
     /// Read directory entries directly from the open file descriptor via `RawDir`.
     pub fn read_entries_fd(&self) -> Result<Vec<SafeDirEntry>> {
@@ -195,6 +269,12 @@ impl SafeDirHandle {
             let ft = entry.file_type();
             let is_symlink = ft == FileType::Symlink;
             let is_dir = ft == FileType::Directory;
+            let is_regular = ft == FileType::RegularFile;
+
+            // Reject special files: FIFO, Socket, BlockDevice, CharacterDevice (Spec 70.md)
+            if !is_regular && !is_dir && !is_symlink {
+                continue;
+            }
 
             // Stat child directly via statat on descriptor
             if let Ok(st) = statat(self.as_fd(), &name, AtFlags::SYMLINK_NOFOLLOW) {
@@ -215,6 +295,8 @@ impl SafeDirHandle {
 
     /// Atomic deletion of a file relative to this directory descriptor with identity revalidation.
     pub fn unlink_child_file(&self, file_name: &str, expected_identity: &FileIdentity) -> Result<()> {
+        validate_single_component(file_name)
+            .map_err(|e| CleanerError::Io(std::io::Error::from_raw_os_error(e.raw_os_error())))?;
         let current_identity = self.stat_child(file_name)?;
         if current_identity != *expected_identity {
             return Err(CleanerError::SafetyViolation(format!(
@@ -229,6 +311,8 @@ impl SafeDirHandle {
 
     /// Atomic removal of an empty sub-directory relative to this descriptor with identity revalidation.
     pub fn rmdir_child_dir(&self, dir_name: &str, expected_identity: &FileIdentity) -> Result<()> {
+        validate_single_component(dir_name)
+            .map_err(|e| CleanerError::Io(std::io::Error::from_raw_os_error(e.raw_os_error())))?;
         let current_identity = self.stat_child(dir_name)?;
         if current_identity != *expected_identity {
             return Err(CleanerError::SafetyViolation(format!(

@@ -7,7 +7,7 @@ use cache_cleaner_daemon::catalog::TargetCatalog;
 use cache_cleaner_daemon::domain::intent::{MutationType, OperationIntent};
 use cache_cleaner_daemon::domain::result::JobResult;
 use cache_cleaner_daemon::domain::types::{
-    AttemptId, ByteCount, DeviceNumber, FileIdentity, GenerationId, InodeNumber, JobId, OperationId,
+    AttemptId, ByteCount, DeviceNumber, FileIdentity, CatalogGeneration, ConfigGeneration, InodeNumber, JobId, OperationId,
     RelativePath, TargetId, WorkerId,
 };
 use cache_cleaner_daemon::recovery::RecoveryEngine;
@@ -57,12 +57,12 @@ fn test_sqlite_and_crash_recovery_reconciliation() {
         cache_cleaner_daemon::domain::TargetSafetyTier::StandardCache,
         cache_cleaner_daemon::domain::TargetClass::AppCache,
         "testapp",
-    );
+    ).unwrap();
 
     // 2. Commit a job and intent to SQLite
     let job_id = JobId(777);
     let attempt_id = AttemptId(1);
-    store.register_job(job_id, "TEST", GenerationId(1), GenerationId(1)).unwrap();
+    store.register_job(job_id, "TEST", CatalogGeneration(1), ConfigGeneration(1)).unwrap();
     store.create_attempt(attempt_id, job_id, WorkerId(1), 60).unwrap();
 
     let intent = OperationIntent::new(
@@ -74,8 +74,8 @@ fn test_sqlite_and_crash_recovery_reconciliation() {
         FileIdentity::new(1, 1),
         ByteCount::new(100),
         MutationType::DeleteFile,
-        GenerationId(1),
-        GenerationId(1),
+        CatalogGeneration(1),
+        ConfigGeneration(1),
     );
     store.commit_operation_intent(&intent).unwrap();
 
@@ -152,7 +152,7 @@ fn test_scanner_streaming_with_backpressure() {
         owner_gid: 0,
         package_name: None,
         safety_tier: cache_cleaner_daemon::domain::target::TargetSafetyTier::StandardCache,
-        catalog_generation: GenerationId::INITIAL,
+        catalog_generation: CatalogGeneration::INITIAL,
     };
 
     let scanner = CandidateScanner::new();

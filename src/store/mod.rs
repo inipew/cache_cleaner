@@ -1,6 +1,6 @@
 pub mod schema;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use crate::domain::intent::{MutationType, OperationIntent};
 use crate::domain::result::{OperationFinalResult, OperationStatus};
 use crate::domain::types::{
-    AttemptId, ByteCount, DeviceNumber, FileIdentity, GenerationId, InodeNumber, JobId,
-    OperationId, PlanId, RelativePath, TargetId, UnixTimestamp, WorkerId,
+    AttemptId, ByteCount, CatalogGeneration, ConfigGeneration, DeviceNumber, FileIdentity,
+    InodeNumber, JobId, OperationId, PlanId, RelativePath, TargetId,
+    UnixTimestamp, WorkerId,
 };
 use crate::error::{CleanerError, Result};
 use schema::{CREATE_TABLES_SQL, SCHEMA_VERSION};
@@ -32,6 +33,8 @@ impl SqliteStore {
             CleanerError::Storage(format!("Failed to open SQLite store at {}: {}", path.display(), e))
         })?;
 
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+
         // Initialize WAL mode, pragmas, and schema
         Self::configure_pragmas(&conn)?;
         Self::init_schema(&conn)?;
@@ -46,6 +49,8 @@ impl SqliteStore {
         let conn = Connection::open_in_memory().map_err(|e| {
             CleanerError::Storage(format!("Failed to open in-memory SQLite store: {}", e))
         })?;
+
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
 
         Self::configure_pragmas(&conn)?;
         Self::init_schema(&conn)?;
@@ -72,11 +77,12 @@ impl SqliteStore {
     }
 
     fn configure_pragmas(conn: &Connection) -> Result<()> {
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = FULL;
+             PRAGMA foreign_keys = ON;",
         )
         .map_err(|e| CleanerError::Storage(format!("Failed to set SQLite pragmas: {}", e)))?;
         Ok(())
@@ -86,6 +92,9 @@ impl SqliteStore {
         conn.execute_batch(CREATE_TABLES_SQL)
             .map_err(|e| CleanerError::Storage(format!("Failed to initialize SQLite schema: {}", e)))?;
 
+        // Apply column additions and migrations on existing tables
+        Self::apply_migrations(conn)?;
+
         // Record migration
         let now = UnixTimestamp::now().as_secs();
         conn.execute(
@@ -93,6 +102,73 @@ impl SqliteStore {
             params![SCHEMA_VERSION, now],
         )
         .map_err(|e| CleanerError::Storage(format!("Failed to record schema migration: {}", e)))?;
+
+        Ok(())
+    }
+
+    fn apply_migrations(conn: &Connection) -> Result<()> {
+        Self::ensure_column_exists(
+            conn,
+            "operation_intents",
+            "state",
+            "TEXT NOT NULL DEFAULT 'COMMITTED'",
+        )?;
+        Self::ensure_column_exists(
+            conn,
+            "operation_intents",
+            "resolved_at",
+            "INTEGER",
+        )?;
+        Self::ensure_column_exists(
+            conn,
+            "jobs",
+            "total_estimated_bytes",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Self::ensure_column_exists(
+            conn,
+            "jobs",
+            "total_reclaimed_bytes",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+
+        // Ensure unique index on (attempt_id, op_id) for S1 aggregator invariant
+        let _ = conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_intents_attempt_op ON operation_intents(attempt_id, op_id);",
+            [],
+        );
+
+        Ok(())
+    }
+
+    fn ensure_column_exists(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        column_def: &str,
+    ) -> Result<()> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({});", table))
+            .map_err(|e| CleanerError::Storage(e.to_string()))?;
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .map_err(|e| CleanerError::Storage(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !columns.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+            log::info!("Migrating table {}: adding column {}", table, column);
+            conn.execute(
+                &format!("ALTER TABLE {} ADD COLUMN {} {};", table, column, column_def),
+                [],
+            )
+            .map_err(|e| {
+                CleanerError::Storage(format!(
+                    "Failed to add column {} to {}: {}",
+                    column, table, e
+                ))
+            })?;
+        }
 
         Ok(())
     }
@@ -111,8 +187,8 @@ impl SqliteStore {
         &self,
         job_id: JobId,
         job_type: &str,
-        catalog_gen: GenerationId,
-        config_gen: GenerationId,
+        catalog_gen: CatalogGeneration,
+        config_gen: ConfigGeneration,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = UnixTimestamp::now().as_secs();
@@ -192,9 +268,9 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO operation_intents (
                 job_id, attempt_id, op_id, target_id, rel_path,
-                expected_dev, expected_ino, estimated_bytes, mutation_type,
+                expected_dev, expected_ino, estimated_bytes, mutation_type, state,
                 catalog_generation, config_generation, committed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);",
             params![
                 intent.job_id.0,
                 intent.attempt_id.0,
@@ -205,6 +281,7 @@ impl SqliteStore {
                 intent.expected_identity.ino.0,
                 intent.estimated_bytes.as_u64(),
                 intent.mutation_type.to_string(),
+                intent.state.to_string(),
                 intent.catalog_generation.0,
                 intent.config_generation.0,
                 intent.committed_at.as_secs(),
@@ -213,6 +290,87 @@ impl SqliteStore {
         .map_err(|e| CleanerError::Storage(format!("Failed to commit operation intent: {}", e)))?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Commits a batch of operation intents within a single immediate SQLite transaction.
+    pub fn commit_operation_intents_batch(&self, intents: &[OperationIntent]) -> Result<()> {
+        if intents.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| CleanerError::Storage(format!("Failed to begin transaction: {}", e)))?;
+
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT INTO operation_intents (
+                        job_id, attempt_id, op_id, target_id, rel_path, expected_dev,
+                        expected_ino, estimated_bytes, mutation_type, state,
+                        catalog_generation, config_generation, committed_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);",
+                )
+                .map_err(|e| CleanerError::Storage(format!("Failed to prepare statement: {}", e)))?;
+
+            for intent in intents {
+                stmt.execute(params![
+                    intent.job_id.0,
+                    intent.attempt_id.0,
+                    intent.op_id.0,
+                    intent.target_id.0,
+                    intent.rel_path.as_str(),
+                    intent.expected_identity.dev.0,
+                    intent.expected_identity.ino.0,
+                    intent.estimated_bytes.as_u64(),
+                    intent.mutation_type.to_string(),
+                    intent.state.to_string(),
+                    intent.catalog_generation.0,
+                    intent.config_generation.0,
+                    intent.committed_at.as_secs(),
+                ])
+                .map_err(|e| CleanerError::Storage(format!("Failed to insert intent in batch: {}", e)))?;
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| CleanerError::Storage(format!("Failed to commit intent batch transaction: {}", e)))?;
+        Ok(())
+    }
+
+    /// Retrieves an execution summary of a job from SQLite.
+    pub fn get_job_summary(&self, job_id: JobId) -> Result<Option<(String, u64, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT state, total_reclaimed_bytes, updated_at FROM jobs WHERE job_id = ?1;",
+            )
+            .map_err(|e| CleanerError::Storage(format!("Failed to prepare query: {}", e)))?;
+
+        let mut rows = stmt
+            .query(params![job_id.0])
+            .map_err(|e| CleanerError::Storage(format!("Failed to query job: {}", e)))?;
+
+        if let Some(row) = rows.next().map_err(|e| CleanerError::Storage(e.to_string()))? {
+            let state: String = row.get(0).map_err(|e| CleanerError::Storage(e.to_string()))?;
+            let reclaimed: i64 = row.get(1).map_err(|e| CleanerError::Storage(e.to_string()))?;
+            let updated: i64 = row.get(2).map_err(|e| CleanerError::Storage(e.to_string()))?;
+            Ok(Some((state, reclaimed.max(0) as u64, updated.max(0) as u64)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Updates intent state upon mutation lifecycle progression.
+    pub fn update_intent_state(&self, attempt_id: AttemptId, op_id: OperationId, state: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = UnixTimestamp::now().as_secs();
+        conn.execute(
+            "UPDATE operation_intents SET state = ?1, resolved_at = ?2 WHERE attempt_id = ?3 AND op_id = ?4;",
+            params![state, now, attempt_id.0, op_id.0],
+        )
+        .map_err(|e| CleanerError::Storage(format!("Failed to update intent state: {}", e)))?;
+        Ok(())
     }
 
     /// Records the finalized result of an operation in the database.
@@ -265,34 +423,47 @@ impl SqliteStore {
     }
 
     /// Acquires a resource lease. Fails if lease is currently active and unexpired.
+    /// Fully compatible with SQLite 3.22+ (Android 9+) without requiring SQLite 3.35+ syntax.
     pub fn acquire_lease(&self, resource_id: &str, worker_id: WorkerId, ttl_secs: u64) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         let now = UnixTimestamp::now().as_secs();
         let expires_at = now + ttl_secs;
         let token = format!("lease-{}-{}", worker_id.0, now);
 
-        // Delete expired lease if exists
-        let _ = conn.execute(
+        let tx = conn.transaction().map_err(|e| CleanerError::Storage(e.to_string()))?;
+
+        // 1. Delete expired lease if exists
+        let _ = tx.execute(
             "DELETE FROM leases WHERE resource_id = ?1 AND expires_at <= ?2;",
             params![resource_id, now],
         );
 
-        let res = conn.execute(
-            "INSERT INTO leases (resource_id, worker_id, lease_token, acquired_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(resource_id) DO UPDATE SET
-                worker_id = ?2,
-                lease_token = ?3,
-                acquired_at = ?4,
-                expires_at = ?5
-             WHERE leases.expires_at <= ?4 OR leases.worker_id = ?2;",
-            params![resource_id, worker_id.0, token, now, expires_at],
-        );
+        // 2. Check if active unexpired lease is held by another worker
+        let existing: Option<(u32, u64)> = tx
+            .query_row(
+                "SELECT worker_id, expires_at FROM leases WHERE resource_id = ?1;",
+                params![resource_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| CleanerError::Storage(e.to_string()))?;
 
-        match res {
-            Ok(count) => Ok(count > 0),
-            Err(_) => Ok(false),
+        if let Some((active_worker, exp)) = existing {
+            if active_worker != worker_id.0 && exp > now {
+                return Ok(false);
+            }
         }
+
+        // 3. Insert or replace lease for this worker
+        tx.execute(
+            "INSERT OR REPLACE INTO leases (resource_id, worker_id, lease_token, acquired_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5);",
+            params![resource_id, worker_id.0, token, now, expires_at],
+        )
+        .map_err(|e| CleanerError::Storage(format!("Failed to insert lease: {}", e)))?;
+
+        tx.commit().map_err(|e| CleanerError::Storage(e.to_string()))?;
+        Ok(true)
     }
 
     /// Releases a resource lease.
@@ -388,8 +559,8 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT intent_id, job_id, attempt_id, op_id, target_id, rel_path,
-                        expected_dev, expected_ino, estimated_bytes, mutation_type,
-                        catalog_generation, config_generation, committed_at
+                        expected_dev, expected_ino, estimated_bytes, mutation_type, state,
+                        catalog_generation, config_generation, committed_at, resolved_at
                  FROM operation_intents WHERE attempt_id = ?1 ORDER BY intent_id ASC;",
             )
             .map_err(|e| CleanerError::Storage(e.to_string()))?;
@@ -406,14 +577,24 @@ impl SqliteStore {
                 let ino: u64 = row.get(7)?;
                 let estimated: u64 = row.get(8)?;
                 let mut_type_str: String = row.get(9)?;
-                let cat_gen: u64 = row.get(10)?;
-                let cfg_gen: u64 = row.get(11)?;
-                let committed: u64 = row.get(12)?;
+                let state_str: String = row.get(10)?;
+                let cat_gen: u64 = row.get(11)?;
+                let cfg_gen: u64 = row.get(12)?;
+                let committed: u64 = row.get(13)?;
+                let resolved: Option<u64> = row.get(14)?;
 
                 let mutation_type = match mut_type_str.as_str() {
                     "DELETE_DIR_EMPTY" => MutationType::DeleteDirEmpty,
                     "PRUNE_DIR_RECURSIVE" => MutationType::PruneDirRecursive,
                     _ => MutationType::DeleteFile,
+                };
+
+                let state = match state_str.as_str() {
+                    "MUTATING" => crate::domain::intent::IntentState::Mutating,
+                    "VERIFIED_SUCCESS" => crate::domain::intent::IntentState::VerifiedSuccess,
+                    "VERIFIED_FAILED" => crate::domain::intent::IntentState::VerifiedFailed,
+                    "RESOLVED_UNKNOWN" => crate::domain::intent::IntentState::ResolvedUnknown,
+                    _ => crate::domain::intent::IntentState::Committed,
                 };
 
                 Ok(OperationIntent {
@@ -427,11 +608,13 @@ impl SqliteStore {
                         dev: DeviceNumber(dev),
                         ino: InodeNumber(ino),
                     },
-                    estimated_bytes: ByteCount::new(estimated),
+                    estimated_bytes: ByteCount::new_unchecked(estimated),
                     mutation_type,
-                    catalog_generation: GenerationId(cat_gen),
-                    config_generation: GenerationId(cfg_gen),
+                    state,
+                    catalog_generation: CatalogGeneration(cat_gen),
+                    config_generation: ConfigGeneration(cfg_gen),
                     committed_at: UnixTimestamp::from_secs(committed),
+                    resolved_at: resolved.map(UnixTimestamp::from_secs),
                 })
             })
             .map_err(|e| CleanerError::Storage(e.to_string()))?;

@@ -95,4 +95,35 @@ mod tests {
         let _ = std::fs::remove_file(valid_file);
         let _ = std::fs::remove_file(invalid_file);
     }
+
+    #[test]
+    fn test_config_pipeline_bridging_and_categories() {
+        use cache_cleaner_daemon::config_pipeline::{RawConfig, ValidatedConfig};
+
+        // 1. Verify min_file_age_hours conversion to seconds without losing precision
+        let raw = RawConfig {
+            min_file_age_hours: Some(12),
+            whitelist_packages: Some(vec!["com.custom.app".into()]),
+            clean_tombstones: Some(true),
+            clean_oem_logs: Some(true),
+            clean_temp_apks: Some(true),
+            ..Default::default()
+        };
+
+        let val = ValidatedConfig::from_raw(raw).expect("Validation should succeed");
+        assert_eq!(val.min_app_cache_age_secs, 12 * 3600);
+        assert_eq!(val.whitelist_packages, vec!["com.custom.app".to_string()]);
+        assert!(val.clean_tombstones);
+        assert!(val.clean_oem_logs);
+        assert!(val.clean_temp_apks);
+
+        // 2. Default fallback when min_file_age_hours is None uses min_app_cache_age_days
+        let raw_days = RawConfig {
+            min_app_cache_age_days: Some(5),
+            min_file_age_hours: None,
+            ..Default::default()
+        };
+        let val_days = ValidatedConfig::from_raw(raw_days).unwrap();
+        assert_eq!(val_days.min_app_cache_age_secs, 5 * 86400);
+    }
 }

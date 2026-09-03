@@ -154,16 +154,9 @@ impl PidLock {
         &self.pid_path
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn pid_path(&self) -> &Path {
-        &self.pid_path
     }
 }
 

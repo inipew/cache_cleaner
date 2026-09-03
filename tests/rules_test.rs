@@ -5,7 +5,7 @@ mod tests {
     use cache_cleaner_daemon::domain::decision::{DecisionReason, PolicyDecision};
     use cache_cleaner_daemon::domain::target::{TargetClass, TargetDescriptor, TargetSafetyTier};
     use cache_cleaner_daemon::domain::types::{
-        ByteCount, CandidateId, DeviceNumber, FileIdentity, GenerationId, InodeNumber,
+        ByteCount, CandidateId, DeviceNumber, FileIdentity, CatalogGeneration, ConfigGeneration, InodeNumber,
         RelativePath, TargetId, UnixTimestamp,
     };
     use cache_cleaner_daemon::policy::PolicyEngine;
@@ -23,7 +23,7 @@ mod tests {
             owner_gid: 1000,
             package_name: pkg_name.map(|s| s.to_string()),
             safety_tier: TargetSafetyTier::StandardCache,
-            catalog_generation: GenerationId::INITIAL,
+            catalog_generation: CatalogGeneration::INITIAL,
         };
 
         let val_cfg = ValidatedConfig::from_raw(RawConfig {
@@ -32,7 +32,7 @@ mod tests {
             ..Default::default()
         }).unwrap();
 
-        let eff_cfg = EffectiveConfig::new(GenerationId::INITIAL, val_cfg);
+        let eff_cfg = EffectiveConfig::new(ConfigGeneration::INITIAL, val_cfg);
         (descriptor, eff_cfg)
     }
 
@@ -172,5 +172,95 @@ mod tests {
             }
             assert!(count > 0);
         }
+    }
+
+    #[test]
+    fn test_directory_candidate_bypasses_file_age_retention() {
+        let (descriptor, eff_cfg) = create_test_context(Some("com.example.app"), TargetClass::AppCache);
+        let now = UnixTimestamp::now();
+
+        // Fresh directory created 5 seconds ago
+        let dir_candidate = Candidate {
+            candidate_id: CandidateId(10),
+            target_id: descriptor.target_id.clone(),
+            rel_path: RelativePath::parse("sub_cache_dir").unwrap(),
+            identity: FileIdentity::new(1, 200),
+            size_bytes: ByteCount::ZERO,
+            mtime: now, // recent mtime
+            atime: None,
+            is_dir: true,
+            is_symlink: false,
+        };
+
+        let safety = SafetyGate::new();
+        let validated = safety.validate_candidate(dir_candidate, &descriptor).unwrap();
+        let policy = PolicyEngine::new();
+        let decision = policy.evaluate_candidate(validated, &descriptor, &eff_cfg, now);
+
+        // Directories must NOT be denied by WithinRetentionGracePeriod
+        assert!(matches!(
+            decision,
+            PolicyDecision::Allow(permit) if permit.candidate.candidate.is_dir
+        ));
+    }
+
+    #[test]
+    fn test_target_category_disabled_policy() {
+        let now = UnixTimestamp::now();
+        let old_mtime = UnixTimestamp(now.as_secs().saturating_sub(400_000));
+
+        let descriptor = TargetDescriptor {
+            target_id: TargetId::new("system:tombstones"),
+            target_class: TargetClass::Tombstones,
+            base_path: PathBuf::from("/data/tombstones"),
+            dev: DeviceNumber(1),
+            ino: InodeNumber(300),
+            owner_uid: 0,
+            owner_gid: 0,
+            package_name: None,
+            safety_tier: TargetSafetyTier::StandardCache,
+            catalog_generation: CatalogGeneration::INITIAL,
+        };
+
+        // 1. clean_tombstones = false (default) -> Denied with CategoryDisabled
+        let val_cfg = ValidatedConfig::from_raw(RawConfig {
+            clean_tombstones: Some(false),
+            ..Default::default()
+        }).unwrap();
+        let eff_cfg = EffectiveConfig::new(ConfigGeneration::INITIAL, val_cfg);
+
+        let candidate = Candidate {
+            candidate_id: CandidateId(11),
+            target_id: descriptor.target_id.clone(),
+            rel_path: RelativePath::parse("tombstone_01").unwrap(),
+            identity: FileIdentity::new(1, 301),
+            size_bytes: ByteCount::new(4096),
+            mtime: old_mtime,
+            atime: None,
+            is_dir: false,
+            is_symlink: false,
+        };
+
+        let safety = SafetyGate::new();
+        let validated = safety.validate_candidate(candidate.clone(), &descriptor).unwrap();
+        let policy = PolicyEngine::new();
+        let decision = policy.evaluate_candidate(validated, &descriptor, &eff_cfg, now);
+        assert!(matches!(
+            decision,
+            PolicyDecision::Deny(deny) if deny.reason == DecisionReason::CategoryDisabled
+        ));
+
+        // 2. clean_tombstones = true -> Allowed
+        let val_cfg_enabled = ValidatedConfig::from_raw(RawConfig {
+            clean_tombstones: Some(true),
+            ..Default::default()
+        }).unwrap();
+        let eff_cfg_enabled = EffectiveConfig::new(ConfigGeneration::INITIAL, val_cfg_enabled);
+        let validated2 = safety.validate_candidate(candidate, &descriptor).unwrap();
+        let decision2 = policy.evaluate_candidate(validated2, &descriptor, &eff_cfg_enabled, now);
+        assert!(matches!(
+            decision2,
+            PolicyDecision::Allow(permit) if permit.reason == DecisionReason::ExceedsRetentionAge
+        ));
     }
 }

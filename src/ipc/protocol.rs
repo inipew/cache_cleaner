@@ -23,6 +23,7 @@ pub enum Command {
     GetStatus,
     GetStats,
     GetIdleAssessment,
+    GetJobStatus(u64),
     Cancel,
     ReloadConfig,
     StopDaemon,
@@ -164,16 +165,26 @@ pub enum Response {
 #[serde(untagged)]
 pub enum ResponseData {
     Pong { version: String, uptime_secs: u64 },
+    JobAccepted {
+        job_id: u64,
+        message: String,
+    },
+    JobStatus {
+        job_id: u64,
+        state: String,
+        reclaimed_bytes: u64,
+        is_completed: bool,
+        report: Option<CleanReport>,
+    },
     Status(DaemonStatus),
     Report(CleanReport),
     Idle(crate::system::idle::IdleAssessment),
     Message(String),
 }
 
-pub const MAX_IPC_FRAME_SIZE: usize = 64 * 1024; // 64 KiB max frame size
+pub const MAX_IPC_FRAME_SIZE: usize = 2 * 1024 * 1024; // 2 MiB max frame size
 
 /// Send a length-prefixed JSON message over a stream
-#[allow(dead_code)]
 pub fn send_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> Result<()> {
     let payload = serde_json::to_vec(message)?;
     if payload.len() > MAX_IPC_FRAME_SIZE {
@@ -190,7 +201,6 @@ pub fn send_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> Resu
 }
 
 /// Read a length-prefixed JSON message from a stream
-#[allow(dead_code)]
 pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> Result<T> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;

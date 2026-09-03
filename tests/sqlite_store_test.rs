@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use cache_cleaner_daemon::domain::intent::{MutationType, OperationIntent};
 use cache_cleaner_daemon::domain::result::{OperationFinalResult, OperationStatus};
 use cache_cleaner_daemon::domain::types::{
-    AttemptId, ByteCount, DeviceNumber, FileIdentity, GenerationId, InodeNumber, JobId,
+    AttemptId, ByteCount, DeviceNumber, FileIdentity, CatalogGeneration, ConfigGeneration, InodeNumber, JobId,
     OperationId, PlanId, RelativePath, TargetId, UnixTimestamp, WorkerId,
 };
 use cache_cleaner_daemon::store::SqliteStore;
@@ -37,7 +37,7 @@ fn test_sqlite_store_lifecycle_and_pragmas() {
     // 1. Register Job
     let job_id = JobId(101);
     store
-        .register_job(job_id, "PERIODIC", GenerationId(1), GenerationId(1))
+        .register_job(job_id, "PERIODIC", CatalogGeneration(1), ConfigGeneration(1))
         .expect("Register job");
 
     // 2. Claim Attempt with Lease
@@ -60,8 +60,8 @@ fn test_sqlite_store_lifecycle_and_pragmas() {
         },
         ByteCount::new(4096),
         MutationType::DeleteFile,
-        GenerationId(1),
-        GenerationId(1),
+        CatalogGeneration(1),
+        ConfigGeneration(1),
     );
     let row_id = store.commit_operation_intent(&intent).expect("Commit intent");
     assert!(row_id > 0);
@@ -120,4 +120,144 @@ fn test_sqlite_leases_and_idempotency() {
     store.set_idempotency_response(key, r#"{"status":"OK","freed":1024}"#).unwrap();
     let second_check = store.check_or_insert_idempotency(key, JobId(1), 60).unwrap();
     assert_eq!(second_check, Some(r#"{"status":"OK","freed":1024}"#.to_string()));
+}
+
+#[test]
+fn test_sqlite_batch_intents_and_job_summary() {
+    let store = SqliteStore::in_memory().expect("In-memory store");
+    let job_id = JobId(500);
+    let attempt_id = AttemptId(1);
+    store
+        .register_job(job_id, "MANUAL", CatalogGeneration(1), ConfigGeneration(1))
+        .expect("Register job");
+    store
+        .create_attempt(attempt_id, job_id, WorkerId(10), 60)
+        .expect("Create attempt");
+
+    let intents = vec![
+        OperationIntent::new(
+            job_id,
+            attempt_id,
+            OperationId(1),
+            TargetId::new("target:1"),
+            RelativePath::parse("file_1.tmp").unwrap(),
+            FileIdentity::new(1, 10),
+            ByteCount::new(100),
+            MutationType::DeleteFile,
+            CatalogGeneration(1),
+            ConfigGeneration(1),
+        ),
+        OperationIntent::new(
+            job_id,
+            attempt_id,
+            OperationId(2),
+            TargetId::new("target:1"),
+            RelativePath::parse("file_2.tmp").unwrap(),
+            FileIdentity::new(1, 11),
+            ByteCount::new(200),
+            MutationType::DeleteFile,
+            CatalogGeneration(1),
+            ConfigGeneration(1),
+        ),
+    ];
+
+    // Batch insert must succeed under atomic transaction
+    store.commit_operation_intents_batch(&intents).expect("Batch intent commit");
+
+    // Update job state and verify get_job_summary
+    store.update_job_state(job_id, "COMPLETED", ByteCount::new(300)).expect("Update job state");
+    let summary = store.get_job_summary(job_id).expect("Query summary");
+    assert!(summary.is_some());
+    let (state, reclaimed, _) = summary.unwrap();
+    assert_eq!(state, "COMPLETED");
+    assert_eq!(reclaimed, 300);
+}
+
+#[test]
+fn test_sqlite_schema_migration_from_v1_legacy() {
+    let sandbox = TestSandbox::new("migration");
+    let db_path = sandbox.root.join("legacy_v1.db");
+
+    // 1. Manually create a legacy v1 database WITHOUT 'state' and 'resolved_at' in operation_intents
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+            INSERT INTO schema_migrations (version, applied_at) VALUES (1, 1000);
+
+            CREATE TABLE jobs (
+                job_id INTEGER PRIMARY KEY, job_type TEXT NOT NULL, state TEXT NOT NULL,
+                catalog_generation INTEGER NOT NULL, config_generation INTEGER NOT NULL,
+                total_estimated_bytes INTEGER NOT NULL DEFAULT 0, total_reclaimed_bytes INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE attempts (
+                attempt_id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, worker_id INTEGER NOT NULL,
+                state TEXT NOT NULL, lease_expires_at INTEGER NOT NULL, started_at INTEGER NOT NULL,
+                finished_at INTEGER
+            );
+
+            -- Legacy operation_intents without state and resolved_at
+            CREATE TABLE operation_intents (
+                intent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                attempt_id INTEGER NOT NULL,
+                op_id INTEGER NOT NULL,
+                target_id TEXT NOT NULL,
+                rel_path TEXT NOT NULL,
+                expected_dev INTEGER NOT NULL,
+                expected_ino INTEGER NOT NULL,
+                estimated_bytes INTEGER NOT NULL,
+                mutation_type TEXT NOT NULL,
+                catalog_generation INTEGER NOT NULL,
+                config_generation INTEGER NOT NULL,
+                committed_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    // 2. Open with SqliteStore - should automatically migrate schema by adding missing columns
+    let store = SqliteStore::open_or_create(&db_path).expect("Store must successfully migrate legacy DB");
+
+    // 3. Register a job and attempt
+    let job_id = JobId(777);
+    let attempt_id = AttemptId(1);
+    store
+        .register_job(job_id, "PERIODIC", CatalogGeneration(1), ConfigGeneration(1))
+        .expect("Register job");
+    store
+        .create_attempt(attempt_id, job_id, WorkerId(1), 60)
+        .expect("Create attempt");
+
+    let intents = vec![OperationIntent::new(
+        job_id,
+        attempt_id,
+        OperationId(1),
+        TargetId::new("pkg:cache"),
+        RelativePath::parse("migrated.tmp").unwrap(),
+        FileIdentity::new(1, 555),
+        ByteCount::new(1024),
+        MutationType::DeleteFile,
+        CatalogGeneration(1),
+        ConfigGeneration(1),
+    )];
+
+    // 4. Batch commit MUST NOT fail with "no column named state"
+    store
+        .commit_operation_intents_batch(&intents)
+        .expect("Batch commit must succeed on migrated table");
+
+    // 5. Query back to verify state was written
+    let queried = store
+        .get_operation_intents_for_attempt(attempt_id)
+        .expect("Query intents");
+    assert_eq!(queried.len(), 1);
+    assert_eq!(
+        queried[0].state,
+        cache_cleaner_daemon::domain::intent::IntentState::Committed
+    );
 }

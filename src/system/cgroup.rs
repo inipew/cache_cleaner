@@ -69,7 +69,6 @@ pub fn detect_cgroup_version() -> CgroupVersion {
 }
 
 /// Checks if Cgroup v2 memory.reclaim interface is available in the kernel
-#[allow(dead_code)]
 #[must_use]
 pub fn is_memory_reclaim_supported() -> bool {
     !discover_memory_reclaim_paths().is_empty()
@@ -162,7 +161,7 @@ pub fn get_cgroup_diagnostics() -> CgroupDiagnostics {
         detected_version: format!("{version}"),
         controllers_available: controllers,
         current_process_cgroups: read_current_process_cgroups(),
-        supports_memory_reclaim: !reclaim_paths.is_empty(),
+        supports_memory_reclaim: is_memory_reclaim_supported(),
         active_reclaim_paths: reclaim_paths,
     }
 }

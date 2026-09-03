@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::domain::types::{
-    ByteCount, FileIdentity, GenerationId, JobId, OperationId, RelativePath, TargetId,
-    UnixTimestamp,
+    ByteCount, CatalogGeneration, ConfigGeneration, FileIdentity, JobId, OperationId, PlanId,
+    RelativePath, TargetId, UnixTimestamp,
 };
 
 /// Specific mutation or maintenance operation type.
@@ -65,20 +65,26 @@ pub struct PlannedOperation {
 /// Immutable, deterministic plan constructed by the Planner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedPlan {
-    pub plan_id: u64,
+    pub plan_id: PlanId,
     pub job_id: JobId,
-    pub catalog_generation: GenerationId,
+    pub catalog_generation: CatalogGeneration,
+    pub config_generation: ConfigGeneration,
     pub operations: Vec<PlannedOperation>,
     pub total_estimated_reclaim: ByteCount,
     pub created_at: UnixTimestamp,
 }
 
 impl PlannedPlan {
-    pub fn empty(job_id: JobId, catalog_generation: GenerationId) -> Self {
+    pub fn empty(
+        job_id: JobId,
+        catalog_generation: CatalogGeneration,
+        config_generation: ConfigGeneration,
+    ) -> Self {
         Self {
-            plan_id: 1,
+            plan_id: PlanId(1),
             job_id,
             catalog_generation,
+            config_generation,
             operations: Vec::new(),
             total_estimated_reclaim: ByteCount::ZERO,
             created_at: UnixTimestamp::now(),

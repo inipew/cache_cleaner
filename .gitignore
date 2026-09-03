@@ -3,3 +3,7 @@ dist/
 *.zip
 .system_generated/
 cleaner.log*
+fstrim_state.json
+*.db
+*.db-wal
+*.db-shm

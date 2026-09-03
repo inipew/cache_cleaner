@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::audit::AuditLogger;
@@ -8,7 +8,7 @@ use crate::config::DaemonConfig;
 use crate::config_pipeline::{EffectiveConfig, ValidatedConfig};
 use crate::domain::decision::PolicyDecision;
 use crate::domain::result::JobResult;
-use crate::domain::types::{AttemptId, ByteCount, GenerationId, UnixTimestamp, WorkerId};
+use crate::domain::types::{AttemptId, ByteCount, ConfigGeneration, UnixTimestamp, WorkerId};
 use crate::engine::cancellation::CancellationToken;
 use crate::engine::storage::StorageOptimizer;
 use crate::error::Result;
@@ -46,24 +46,26 @@ pub struct AuthoritativeCleanPipeline {
     scheduler: SchedulerService,
     worker_pool: WorkerPool,
     f2fs: F2fsController,
-    config_generation: GenerationId,
+    config_generation: ConfigGeneration,
 }
 
 impl AuthoritativeCleanPipeline {
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let store = SqliteStore::default_store()?;
         let catalog = TargetCatalog::new();
+        catalog.discover_all_targets(); // CRITICAL P0: Discover all targets BEFORE startup crash recovery!
         let verifier = PostconditionVerifier::new();
         let recovery = RecoveryEngine::new();
 
-        // Perform startup crash reconciliation
+        // Perform startup crash reconciliation with fully populated catalog
         let _ = recovery.reconcile_startup_crashes(&store, &catalog, &verifier);
 
         let scheduler = SchedulerService::new(store.clone());
         let worker_pool = WorkerPool::new(store.clone(), WorkerId(1));
         let audit_logger = AuditLogger::default_logger().unwrap_or_else(|_| {
-            AuditLogger::open_or_create(&PathBuf::from("/data/adb/cleaner/audit/audit.jsonl"))
-                .unwrap_or_else(|_| AuditLogger::open_or_create(&std::env::temp_dir().join("audit.jsonl")).unwrap())
+            let secure_dir = store.db_path().parent().unwrap_or(Path::new("/data/adb/cleaner/audit"));
+            AuditLogger::open_or_create(&secure_dir.join("audit.jsonl"))
+                .expect("Failed to initialize secure audit logger")
         });
 
         Ok(Self {
@@ -83,7 +85,7 @@ impl AuthoritativeCleanPipeline {
             scheduler,
             worker_pool,
             f2fs: F2fsController::discover(),
-            config_generation: GenerationId::INITIAL,
+            config_generation: ConfigGeneration::INITIAL,
         })
     }
 
@@ -116,8 +118,8 @@ impl AuthoritativeCleanPipeline {
 
         match &result {
             Ok(report) => {
-                let _ = self.store.update_job_state(admission.job_id, "COMPLETED", ByteCount::new(report.storage.total_freed_bytes));
-                let _ = self.worker_pool.finish_attempt(attempt_id, admission.job_id, "SUCCESS");
+                self.store.update_job_state(admission.job_id, "COMPLETED", ByteCount::new(report.storage.total_freed_bytes))?;
+                self.worker_pool.finish_attempt(attempt_id, admission.job_id, "SUCCESS")?;
             }
             Err(e) => {
                 let _ = self.store.update_job_state(admission.job_id, "FAILED", ByteCount::ZERO);
@@ -140,6 +142,21 @@ impl AuthoritativeCleanPipeline {
             min_screen_off_secs: Some(self.config.min_screen_off_secs),
             max_soc_temp_c: Some(self.config.max_soc_temp_c),
             max_battery_temp_c: Some(self.config.max_battery_temp_c),
+            min_file_age_hours: Some(self.config.cleaning.min_file_age_hours as u64),
+            dry_run: Some(admission.dry_run),
+            clean_app_cache: Some(self.config.cleaning.clean_app_cache),
+            clean_code_cache: Some(self.config.cleaning.clean_code_cache),
+            clean_tombstones: Some(self.config.cleaning.clean_crash_dumps),
+            clean_oem_logs: Some(self.config.cleaning.clean_oem_logs),
+            clean_temp_apks: Some(self.config.cleaning.clean_temp_apks),
+            whitelist_packages: Some(self.config.safety.whitelist_packages.clone()),
+            protected_paths: Some(
+                self.config
+                    .safety
+                    .protected_directory_names
+                    .to_vec(),
+            ),
+            maintenance_interval_secs: Some(self.config.maintenance_interval_secs),
             ..Default::default()
         })?;
         let eff_cfg = EffectiveConfig::new(self.config_generation, val_cfg);
@@ -188,7 +205,12 @@ impl AuthoritativeCleanPipeline {
         }
 
         // 7. Construct deterministic hierarchical DAG plan
-        let planned_plan = self.planner.build_plan(admission.job_id, snapshot.generation, all_permits);
+        let planned_plan = self.planner.build_plan(
+            admission.job_id,
+            snapshot.generation,
+            admission.config_generation,
+            all_permits,
+        )?;
 
         // 8. Issue scoped capability grant
         let authorized_plan = self.auth.authorize_plan(
@@ -205,9 +227,9 @@ impl AuthoritativeCleanPipeline {
                 attempt_id,
                 total_reclaimed: authorized_plan.plan.total_estimated_reclaim,
                 total_operations: authorized_plan.plan.operations.len(),
-                successful_operations: authorized_plan.plan.operations.len(),
+                successful_operations: 0,
                 failed_operations: 0,
-                skipped_operations: 0,
+                skipped_operations: authorized_plan.plan.operations.len(),
                 duration_ms: 0,
             }
         } else {
@@ -215,10 +237,11 @@ impl AuthoritativeCleanPipeline {
             self.executor.execute_plan(
                 &authorized_plan,
                 snapshot,
+                self.config_generation,
                 attempt_id,
                 cancel_token,
                 &self.resource_mgr,
-                Some(&self.store),
+                &self.store,
                 &self.safety,
                 &self.verifier,
             )?
@@ -285,6 +308,6 @@ impl AuthoritativeCleanPipeline {
 
     pub fn update_config(&mut self, config: DaemonConfig) {
         self.config = config;
-        self.config_generation = GenerationId(self.config_generation.0.wrapping_add(1));
+        self.config_generation = self.config_generation.next_saturating();
     }
 }

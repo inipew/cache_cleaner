@@ -244,6 +244,7 @@ pub fn is_command_authorized(caller_uid: u32, cmd: &Command) -> bool {
         Command::GetStatus
         | Command::GetStats
         | Command::GetIdleAssessment
+        | Command::GetJobStatus(_)
         | Command::Ping => {
             // Read-only queries allowed for system (1000) and shell (2000)
             caller_uid == 1000 || caller_uid == 2000

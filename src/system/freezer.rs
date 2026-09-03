@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FreezerState {
     Frozen,
@@ -57,7 +56,6 @@ pub fn detect_freezer_version() -> &'static str {
 }
 
 /// Returns whether the kernel and ROM support process/UID freezing
-#[allow(dead_code)]
 pub fn is_freezer_supported() -> bool {
     detect_freezer_version() != "none"
 }
@@ -84,7 +82,6 @@ pub fn is_cached_apps_freezer_enabled() -> bool {
 }
 
 /// Checks the freezer state for a specific Linux UID (e.g. 10000..19999 for Android apps)
-#[allow(dead_code)]
 #[must_use]
 pub fn get_uid_freezer_state(uid: u32) -> FreezerState {
     let version = detect_freezer_version();
@@ -153,7 +150,6 @@ pub fn get_uid_freezer_state(uid: u32) -> FreezerState {
 }
 
 /// Checks the freezer state for a specific process PID
-#[allow(dead_code)]
 #[must_use]
 pub fn get_pid_freezer_state(pid: u32) -> FreezerState {
     let version = detect_freezer_version();

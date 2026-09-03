@@ -7,16 +7,11 @@ use crate::error::Result;
 // ==============================================================================
 // Mandatory Fixed Paths for Android Production Deployment
 // ==============================================================================
-#[allow(dead_code)]
 pub const BASE_DIR: &str = "/data/adb/cleaner";
-#[allow(dead_code)]
 pub const BIN_PATH: &str = "/data/adb/cleaner/bin/cleaner";
-#[allow(dead_code)]
 pub const RUN_DIR: &str = "/data/adb/cleaner/run";
-#[allow(dead_code)]
 pub const CONFIG_PATH: &str = "/data/adb/cleaner/config.toml";
 pub const SOCKET_PATH: &str = "/data/adb/cleaner/run/daemon";
-#[allow(dead_code)]
 pub const LOG_PATH: &str = "/data/adb/cleaner/run/cleaner.log";
 pub const PID_PATH: &str = "/data/adb/cleaner/run/cleaner.pid";
 pub const LOCK_PATH: &str = "/data/adb/cleaner/run/cleaner_daemon.lock";
@@ -385,7 +380,6 @@ impl DaemonConfig {
         (DaemonConfig::default(), None)
     }
 
-    #[allow(dead_code)]
     pub fn load_or_default<P: AsRef<Path>>(path: Option<P>) -> Self {
         let (config, _) = Self::load_or_default_with_path(path);
         config

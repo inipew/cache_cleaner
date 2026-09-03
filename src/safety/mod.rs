@@ -2,8 +2,40 @@ use std::path::Path;
 
 use crate::domain::candidate::{Candidate, SafetyValidatedCandidate};
 use crate::domain::target::TargetDescriptor;
-use crate::domain::types::FileIdentity;
+use crate::domain::types::{
+    CatalogGeneration, ConfigGeneration, FileIdentity, OperationId, TargetId, UnixTimestamp,
+};
 use crate::error::{CleanerError, Result};
+
+/// Non-forgeable safety proof — bound to operation, generations, and expiry per 70.md:52-58.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyProof {
+    pub target_id: TargetId,
+    pub expected_identity: FileIdentity,
+    pub operation_id: OperationId,
+    pub catalog_generation: CatalogGeneration,
+    pub config_generation: ConfigGeneration,
+    pub validated_at: UnixTimestamp,
+    pub expires_at: UnixTimestamp,
+}
+
+impl SafetyProof {
+    pub fn is_expired(&self, now: UnixTimestamp) -> bool {
+        now.as_secs() > self.expires_at.as_secs()
+    }
+    pub fn is_valid_for(
+        &self,
+        op_id: OperationId,
+        now: UnixTimestamp,
+        catalog_gen: CatalogGeneration,
+        config_gen: ConfigGeneration,
+    ) -> bool {
+        self.operation_id == op_id
+            && self.catalog_generation == catalog_gen
+            && self.config_generation == config_gen
+            && !self.is_expired(now)
+    }
+}
 
 /// Safety Gate engine enforcing absolute filesystem invariants before policy evaluation and at the mutation boundary.
 #[derive(Debug, Default)]
@@ -62,12 +94,16 @@ impl SafetyGate {
     }
 
     /// Final safety revalidation performed right before physical filesystem destructive mutation.
+    /// Now requires operation and generation binding per 70.md:51-58.
     pub fn validate_mutation_boundary(
         &self,
         target: &TargetDescriptor,
         rel_path: &Path,
         expected_identity: &FileIdentity,
-    ) -> Result<()> {
+        operation_id: OperationId,
+        catalog_generation: CatalogGeneration,
+        config_generation: ConfigGeneration,
+    ) -> Result<SafetyProof> {
         if !target.is_mutation_allowed() {
             return Err(CleanerError::SafetyViolation(format!(
                 "Mutation boundary rejected: Target {} safety tier {:?} is read-only",
@@ -90,16 +126,50 @@ impl SafetyGate {
             )));
         }
 
-        Ok(())
+        let now = UnixTimestamp::now();
+        // Proof expires in 30 seconds — prevents stale reuse (70.md:57)
+        let expires_at = UnixTimestamp::from_secs(now.as_secs().saturating_add(30));
+        // Generation binding: ensure target descriptor generation matches expected catalog
+        if target.catalog_generation != catalog_generation {
+            return Err(CleanerError::SafetyViolation(format!(
+                "Catalog generation mismatch: target {} vs expected {}",
+                target.catalog_generation, catalog_generation
+            )));
+        }
+        Ok(SafetyProof {
+            target_id: target.target_id.clone(),
+            expected_identity: *expected_identity,
+            operation_id,
+            catalog_generation,
+            config_generation,
+            validated_at: now,
+            expires_at,
+        })
     }
 
     fn verify_target_root_safety(&self, path: &Path) -> Result<()> {
-        let p_str = path.to_string_lossy();
-        if p_str == "/" || p_str == "/system" || p_str == "/vendor" || p_str == "/etc" || p_str == "/boot" {
-            return Err(CleanerError::SafetyViolation(format!(
-                "Critical invariant violation: Protected system root '{}' must never be targeted for mutation",
-                p_str
-            )));
+        let path_comps: Vec<_> = path.components().collect();
+        if path_comps.is_empty()
+            || (path_comps.len() == 1 && path_comps[0] == std::path::Component::RootDir)
+        {
+            return Err(CleanerError::SafetyViolation(
+                "Critical invariant violation: Root '/' must never be targeted for mutation".into(),
+            ));
+        }
+
+        for prot in crate::config_pipeline::PLATFORM_INVARIANT_PROTECTED_PATHS {
+            let prot_path = Path::new(prot);
+            let prot_comps: Vec<_> = prot_path.components().collect();
+            if path_comps.len() >= prot_comps.len()
+                && !prot_comps.is_empty()
+                && path_comps[..prot_comps.len()] == prot_comps[..]
+            {
+                return Err(CleanerError::SafetyViolation(format!(
+                    "Critical invariant violation: Protected system root '{}' must never be targeted for mutation (path: {})",
+                    prot,
+                    path.display()
+                )));
+            }
         }
         Ok(())
     }

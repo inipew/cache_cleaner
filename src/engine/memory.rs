@@ -105,21 +105,4 @@ impl MemoryOptimizer {
 
         success
     }
-
-    /// Safely flushes dirty pages and reclaims inactive pagecaches
-    #[allow(dead_code)]
-    pub fn safe_drop_caches() -> bool {
-        #[cfg(unix)]
-        {
-            // Sync filesystems first before dropping caches
-            unsafe { libc::sync() };
-        }
-
-        let drop_path = "/proc/sys/vm/drop_caches";
-        if Path::new(drop_path).exists() && fs::write(drop_path, "3\n").is_ok() {
-            log::info!("Kernel page caches reclaimed");
-            return true;
-        }
-        false
-    }
 }

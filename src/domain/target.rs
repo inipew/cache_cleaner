@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::domain::types::{DeviceNumber, GenerationId, InodeNumber, TargetId};
+use crate::domain::types::{CatalogGeneration, DeviceNumber, InodeNumber, TargetId};
 
 /// Semantic classification of filesystem targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -65,7 +65,7 @@ pub struct TargetDescriptor {
     pub owner_gid: u32,
     pub package_name: Option<String>,
     pub safety_tier: TargetSafetyTier,
-    pub catalog_generation: GenerationId,
+    pub catalog_generation: CatalogGeneration,
 }
 
 impl TargetDescriptor {

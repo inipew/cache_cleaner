@@ -4,7 +4,7 @@
 # and exports CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER.
 # For direct `cargo build --target aarch64-linux-android`, ensure
 # $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin is in PATH.
-linker = "aarch64-linux-android36-clang"
+#linker = "aarch64-linux-android36-clang"
 rustflags = [
     "-C", "link-arg=-Wl,-z,max-page-size=16384",
     "-C", "link-arg=-Wl,-z,common-page-size=16384",

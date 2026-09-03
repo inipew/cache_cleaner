@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub const CREATE_TABLES_SQL: &str = r#"
 -- Schema migrations table
@@ -44,9 +44,12 @@ CREATE TABLE IF NOT EXISTS operation_intents (
     expected_ino INTEGER NOT NULL,
     estimated_bytes INTEGER NOT NULL,
     mutation_type TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'COMMITTED',
     catalog_generation INTEGER NOT NULL,
     config_generation INTEGER NOT NULL,
     committed_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    UNIQUE(attempt_id, op_id),
     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
 );
 
@@ -98,6 +101,7 @@ CREATE TABLE IF NOT EXISTS outbox (
 
 CREATE INDEX IF NOT EXISTS idx_attempts_job_id ON attempts(job_id);
 CREATE INDEX IF NOT EXISTS idx_operation_intents_job_attempt ON operation_intents(job_id, attempt_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_intents_attempt_op ON operation_intents(attempt_id, op_id);
 CREATE INDEX IF NOT EXISTS idx_operations_job_id ON operations(job_id);
 CREATE INDEX IF NOT EXISTS idx_leases_expires_at ON leases(expires_at);
 "#;

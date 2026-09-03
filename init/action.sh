@@ -21,10 +21,14 @@ if [ ! -x "$BIN" ]; then
         cp -f "$MODDIR/system/bin/cleaner" "$BIN"
     elif [ -f "$MODDIR/system/bin/cleaner-daemon" ]; then
         cp -f "$MODDIR/system/bin/cleaner-daemon" "$BIN"
+    elif [ -x "./target/aarch64-linux-android/release/cleaner" ]; then
+        BIN="./target/aarch64-linux-android/release/cleaner"
+    elif [ -x "./target/release/cleaner" ]; then
+        BIN="./target/release/cleaner"
     elif [ -x "./target/release/cache-cleaner-daemon" ]; then
         BIN="./target/release/cache-cleaner-daemon"
-    elif [ -x "./target/debug/cache-cleaner-daemon" ]; then
-        BIN="./target/debug/cache-cleaner-daemon"
+    elif [ -x "./target/debug/cleaner" ]; then
+        BIN="./target/debug/cleaner"
     fi
     chmod 0755 "$BIN" 2>/dev/null
 fi

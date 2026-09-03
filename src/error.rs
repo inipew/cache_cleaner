@@ -2,7 +2,6 @@ use std::fmt;
 use std::io;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum CleanerError {
     Io(io::Error),
     Json(serde_json::Error),
@@ -14,6 +13,8 @@ pub enum CleanerError {
     SafetyViolation(String),
     Storage(String),
     ResourceExhausted(String),
+    PlanBudgetExceeded { count: usize, limit: usize },
+    PlanValidationFailed(String),
     Internal(String),
     DaemonAlreadyRunning(u32),
     DaemonNotRunning,
@@ -35,6 +36,10 @@ impl fmt::Display for CleanerError {
             Self::SafetyViolation(msg) => write!(f, "Safety violation: {msg}"),
             Self::Storage(msg) => write!(f, "Storage error: {msg}"),
             Self::ResourceExhausted(msg) => write!(f, "Resource exhausted: {msg}"),
+            Self::PlanBudgetExceeded { count, limit } => {
+                write!(f, "Plan budget exceeded: candidate count {count} exceeds limit {limit}")
+            }
+            Self::PlanValidationFailed(msg) => write!(f, "Plan validation failed: {msg}"),
             Self::Internal(msg) => write!(f, "Internal error: {msg}"),
             Self::DaemonAlreadyRunning(pid) => {
                 write!(f, "Daemon is already running with PID {pid}")

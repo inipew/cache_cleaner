@@ -3,7 +3,7 @@ mod tests {
     use cache_cleaner_daemon::domain::candidate::Candidate;
     use cache_cleaner_daemon::domain::target::{TargetClass, TargetDescriptor, TargetSafetyTier};
     use cache_cleaner_daemon::domain::types::{
-        ByteCount, CandidateId, DeviceNumber, FileIdentity, GenerationId, InodeNumber,
+        ByteCount, CandidateId, DeviceNumber, FileIdentity, CatalogGeneration, ConfigGeneration, InodeNumber,
         RelativePath, TargetId, UnixTimestamp,
     };
     use cache_cleaner_daemon::ipc::protocol::{CleanParams, Command};
@@ -38,7 +38,7 @@ mod tests {
             owner_gid: 1000,
             package_name: Some("com.example.app".into()),
             safety_tier: TargetSafetyTier::StandardCache,
-            catalog_generation: GenerationId::INITIAL,
+            catalog_generation: CatalogGeneration::INITIAL,
         };
 
         let cand = Candidate {
@@ -66,7 +66,7 @@ mod tests {
             owner_gid: 0,
             package_name: None,
             safety_tier: TargetSafetyTier::ProtectedSystem,
-            catalog_generation: GenerationId::INITIAL,
+            catalog_generation: CatalogGeneration::INITIAL,
         };
 
         let protected_cand = Candidate {
@@ -91,7 +91,7 @@ mod tests {
             owner_gid: 1000,
             package_name: Some("com.example.app".into()),
             safety_tier: TargetSafetyTier::StandardCache,
-            catalog_generation: GenerationId::INITIAL,
+            catalog_generation: CatalogGeneration::INITIAL,
         };
 
         // Candidate on a different device (e.g. dev 99) -> Mount boundary violation!
@@ -186,5 +186,97 @@ mod tests {
         // Untrusted app UID (10123) is denied for all commands
         assert!(!is_command_authorized(10123, &Command::GetStatus));
         assert!(!is_command_authorized(10123, &Command::StopDaemon));
+    }
+
+    #[test]
+    fn test_large_ipc_frame_safety() {
+        use cache_cleaner_daemon::ipc::protocol::{read_message, send_message, Response};
+        use std::io::Cursor;
+
+        // Generate a large response message (> 128 KiB)
+        let large_string = "x".repeat(128 * 1024);
+        let resp = Response::Error(large_string.clone());
+
+        let mut buffer = Vec::new();
+        assert!(send_message(&mut buffer, &resp).is_ok());
+
+        // Ensure buffer exceeds 64 KiB
+        assert!(buffer.len() > 64 * 1024);
+
+        // Verify successful roundtrip decoding
+        let mut cursor = Cursor::new(buffer);
+        let decoded: Response = read_message(&mut cursor).expect("Should decode large frame successfully");
+        match decoded {
+            Response::Error(msg) => assert_eq!(msg, large_string),
+            _ => panic!("Expected Response::Error with matching payload"),
+        }
+    }
+
+    #[test]
+    fn test_platform_trait_abstraction_and_mockability() {
+        use cache_cleaner_daemon::platform::{
+            AndroidPlatform, AndroidSystemInfo, AndroidUser, EncryptionState, Platform, SelinuxMode,
+        };
+        use std::path::PathBuf;
+
+        // 1. Production platform adapter
+        let platform = AndroidPlatform;
+        let users = platform.enumerate_users();
+        assert!(!users.is_empty(), "Should enumerate at least user 0");
+        let enc = platform.check_encryption_state(0);
+        assert!(matches!(
+            enc,
+            EncryptionState::Unencrypted | EncryptionState::FullyUnlocked | EncryptionState::DeviceEncryptedOnly | EncryptionState::Unknown
+        ));
+
+        // 2. Mock platform implementation (demonstrating 100% hermetic test injection)
+        struct MockPlatform;
+        impl Platform for MockPlatform {
+            fn enumerate_users(&self) -> Vec<AndroidUser> {
+                vec![
+                    AndroidUser {
+                        user_id: 0,
+                        ce_path: PathBuf::from("/mock/ce/0"),
+                        de_path: PathBuf::from("/mock/de/0"),
+                        media_path: PathBuf::from("/mock/media/0"),
+                    },
+                    AndroidUser {
+                        user_id: 10,
+                        ce_path: PathBuf::from("/mock/ce/10"),
+                        de_path: PathBuf::from("/mock/de/10"),
+                        media_path: PathBuf::from("/mock/media/10"),
+                    },
+                ]
+            }
+
+            fn check_encryption_state(&self, user_id: u32) -> EncryptionState {
+                if user_id == 10 {
+                    EncryptionState::DeviceEncryptedOnly
+                } else {
+                    EncryptionState::FullyUnlocked
+                }
+            }
+
+            fn get_system_info(&self) -> AndroidSystemInfo {
+                AndroidSystemInfo {
+                    api_level: 34,
+                    release_version: "14".into(),
+                    manufacturer: "google".into(),
+                    brand: "google".into(),
+                    model: "Pixel 8".into(),
+                    is_encrypted: true,
+                }
+            }
+
+            fn get_selinux_mode(&self) -> SelinuxMode {
+                SelinuxMode::Enforcing
+            }
+        }
+
+        let mock = MockPlatform;
+        let mock_users = mock.enumerate_users();
+        assert_eq!(mock_users.len(), 2);
+        assert_eq!(mock.check_encryption_state(10), EncryptionState::DeviceEncryptedOnly);
+        assert_eq!(mock.get_selinux_mode(), SelinuxMode::Enforcing);
     }
 }
