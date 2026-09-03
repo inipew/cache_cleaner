@@ -6,6 +6,7 @@ use crate::auth::AuthorizationEngine;
 use crate::catalog::TargetCatalog;
 use crate::config::DaemonConfig;
 use crate::config_pipeline::{EffectiveConfig, ValidatedConfig};
+use crate::platform::privilege::{APatchPlatform, KernelSUPlatform, MagiskPlatform, PrivilegePlatform};
 use crate::domain::decision::PolicyDecision;
 use crate::domain::result::JobResult;
 use crate::domain::types::{AttemptId, ByteCount, ConfigGeneration, UnixTimestamp, WorkerId};
@@ -49,8 +50,32 @@ pub struct AuthoritativeCleanPipeline {
     config_generation: ConfigGeneration,
 }
 
+fn select_privilege_platform() -> (&'static str, crate::platform::privilege::PlatformCapabilities) {
+    let magisk = MagiskPlatform;
+    if magisk.is_available() {
+        return (magisk.name(), magisk.discover_capabilities());
+    }
+    let ksu = KernelSUPlatform;
+    if ksu.is_available() {
+        return (ksu.name(), ksu.discover_capabilities());
+    }
+    let ap = APatchPlatform;
+    if ap.is_available() {
+        return (ap.name(), ap.discover_capabilities());
+    }
+    // Fallback: probe only openat2/selinux without privilege
+    (magisk.name(), magisk.discover_capabilities())
+}
+
 impl AuthoritativeCleanPipeline {
     pub fn new(config: DaemonConfig) -> Result<Self> {
+        let (platform_name, caps) = select_privilege_platform();
+        log::info!(
+            "Privilege platform selected: {} (openat2={}, selinux_enforcing={})",
+            platform_name,
+            caps.has_openat2,
+            caps.selinux_enforcing
+        );
         let store = SqliteStore::default_store()?;
         let catalog = TargetCatalog::new();
         catalog.discover_all_targets(); // CRITICAL P0: Discover all targets BEFORE startup crash recovery!
